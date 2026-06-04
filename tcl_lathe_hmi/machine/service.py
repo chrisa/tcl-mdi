@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from tcl_lathe_hmi.gcode import (
+    CanonicalAction,
+    MessageAction,
+    MoveAction,
+    SpindleAction,
+    ToolChangeAction,
+)
+
 from .backend import BackendError, CommandRejectedError, MachineBackend
 from .state import MachineState
 
@@ -113,6 +121,62 @@ class MachineService:
         except BackendError as exc:
             self._mark_error(str(exc))
             return False
+
+    def execute_action(
+        self,
+        action: CanonicalAction,
+        *,
+        default_feed: int = 100,
+        default_slew: int = 61,
+    ) -> bool:
+        if isinstance(action, MoveAction):
+            return self._execute_move_action(
+                action,
+                default_feed=default_feed,
+                default_slew=default_slew,
+            )
+        if isinstance(action, SpindleAction):
+            return self.set_spindle(on=action.on, rpm=action.rpm, forward=action.forward)
+        if isinstance(action, ToolChangeAction):
+            tool = "unknown" if action.tool_number is None else str(action.tool_number)
+            station = (
+                "unknown"
+                if action.turret_station is None
+                else str(action.turret_station)
+            )
+            self._mark_rejected(
+                f"Tool change requested at line {action.line_number}: "
+                f"T{tool} station {station}; manual flow is not implemented yet"
+            )
+            return False
+        if isinstance(action, MessageAction):
+            self._mark_rejected(action.message)
+            return False
+        self._mark_rejected(f"Unsupported action at line {getattr(action, 'line_number', '?')}")
+        return False
+
+    def _execute_move_action(
+        self,
+        action: MoveAction,
+        *,
+        default_feed: int,
+        default_slew: int,
+    ) -> bool:
+        dx = action.target_x_mm - self.state.x_mm
+        dz = action.target_z_mm - self.state.z_mm
+        if dx == 0.0 and dz == 0.0:
+            self.state = replace(
+                self.state,
+                status_message=f"Line {action.line_number}: already at target",
+            )
+            return True
+        return self.jog_delta(
+            x_mm=dx,
+            z_mm=dz,
+            mode=action.mode,
+            feed=int(action.feed or default_feed),
+            slew=default_slew,
+        )
 
     def _mark_rejected(self, message: str) -> None:
         self.state = replace(self.state, status_message=message)

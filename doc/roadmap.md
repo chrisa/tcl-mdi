@@ -241,12 +241,18 @@ Features:
 - Apply active tool offsets to work-coordinate display and g-code execution.
 - Add manual tool-change confirmation flow.
 - Add automatic turret flow once exposed through the Python FRED API.
+- Persist current turret position across restarts
+- Support manual update of current turret position
+- When a centre-drill / drill is selected, in manual mode when machine is homed, support move to centre-line.
 
 Important distinction:
 
 - Logical tool number is the machining/tool-offset identity.
 - Physical turret station is the machine position the turret must move to.
 - These must not be collapsed into one field.
+
+There is no feedback of current turret position; the user will need to confirm
+the HMI and machine are in sync.
 
 ### Milestone 4: Homing, Limits, and Recovery
 

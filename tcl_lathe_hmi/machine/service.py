@@ -9,6 +9,7 @@ from tcl_lathe_hmi.gcode import (
     SpindleAction,
     ToolChangeAction,
 )
+from tcl_lathe_hmi.tools import ToolRecord, ToolTable
 
 from .backend import BackendError, CommandRejectedError, MachineBackend
 from .state import MachineState
@@ -19,21 +20,26 @@ class MachineService:
 
     def __init__(self, backend: MachineBackend):
         self.backend = backend
+        self.tool_table = ToolTable([ToolRecord(tool_number=0, station=0)])
         self.state = MachineState(status_message=f"{backend.name}: disconnected")
 
     def set_backend(self, backend: MachineBackend) -> MachineState:
+        tool_state = self._tool_state_kwargs(self.state)
         try:
             self.backend.disconnect()
         except BackendError:
             pass
         self.backend = backend
-        self.state = MachineState(status_message=f"{backend.name}: disconnected")
+        self.state = MachineState(
+            status_message=f"{backend.name}: disconnected",
+            **tool_state,
+        )
         return self.state
 
     def connect(self) -> MachineState:
         try:
             self.backend.connect()
-            self.state = self.backend.poll()
+            self.state = self._merge_tool_state(self.backend.poll())
         except BackendError as exc:
             self.state = replace(
                 self.state,
@@ -46,17 +52,21 @@ class MachineService:
         return self.state
 
     def disconnect(self) -> MachineState:
+        tool_state = self._tool_state_kwargs(self.state)
         try:
             self.backend.disconnect()
         finally:
-            self.state = MachineState(status_message=f"{self.backend.name}: disconnected")
+            self.state = MachineState(
+                status_message=f"{self.backend.name}: disconnected",
+                **tool_state,
+            )
         return self.state
 
     def poll(self) -> MachineState:
         if not self.state.connected and not self.state.error:
             return self.state
         try:
-            self.state = self.backend.poll()
+            self.state = self._merge_tool_state(self.backend.poll())
         except BackendError as exc:
             self.state = replace(
                 self.state,
@@ -98,7 +108,7 @@ class MachineService:
                 feed=feed,
                 slew=slew,
             )
-            self.state = self.backend.poll()
+            self.state = self._merge_tool_state(self.backend.poll())
             return True
         except CommandRejectedError as exc:
             self._mark_rejected(str(exc))
@@ -113,7 +123,7 @@ class MachineService:
             return False
         try:
             self.backend.set_spindle(on=on, rpm=rpm, forward=forward)
-            self.state = self.backend.poll()
+            self.state = self._merge_tool_state(self.backend.poll())
             return True
         except CommandRejectedError as exc:
             self._mark_rejected(str(exc))
@@ -138,17 +148,7 @@ class MachineService:
         if isinstance(action, SpindleAction):
             return self.set_spindle(on=action.on, rpm=action.rpm, forward=action.forward)
         if isinstance(action, ToolChangeAction):
-            tool = "unknown" if action.tool_number is None else str(action.tool_number)
-            station = (
-                "unknown"
-                if action.turret_station is None
-                else str(action.turret_station)
-            )
-            self._mark_rejected(
-                f"Tool change requested at line {action.line_number}: "
-                f"T{tool} station {station}; manual flow is not implemented yet"
-            )
-            return False
+            return self.request_tool_change(action)
         if isinstance(action, MessageAction):
             self._mark_rejected(action.message)
             return False
@@ -162,8 +162,8 @@ class MachineService:
         default_feed: int,
         default_slew: int,
     ) -> bool:
-        dx = action.target_x_mm - self.state.x_mm
-        dz = action.target_z_mm - self.state.z_mm
+        dx = action.target_x_mm - self.state.work_x_mm
+        dz = action.target_z_mm - self.state.work_z_mm
         if dx == 0.0 and dz == 0.0:
             self.state = replace(
                 self.state,
@@ -177,6 +177,90 @@ class MachineService:
             feed=int(action.feed or default_feed),
             slew=default_slew,
         )
+
+    def request_tool_change(self, action: ToolChangeAction) -> bool:
+        tool_number = action.tool_number
+        if tool_number is None:
+            self._mark_rejected(f"Line {action.line_number}: tool change missing T word")
+            return False
+        tool = self.tool_table.ensure_tool(tool_number, action.turret_station)
+        station = action.turret_station if action.turret_station is not None else tool.station
+        self.state = replace(
+            self.state,
+            pending_tool=tool.tool_number,
+            pending_turret_station=station,
+            status_message=(
+                f"Confirm manual tool change to T{tool.tool_number}"
+                + (f" station {station}" if station is not None else "")
+            ),
+        )
+        return False
+
+    def confirm_tool_change(
+        self,
+        tool_number: int | None = None,
+        station: int | None = None,
+    ) -> bool:
+        selected_tool = tool_number if tool_number is not None else self.state.pending_tool
+        if selected_tool is None:
+            self._mark_rejected("No pending tool change to confirm")
+            return False
+        tool = self.tool_table.ensure_tool(selected_tool, station)
+        active_station = station if station is not None else tool.station
+        self.state = replace(
+            self.state,
+            active_tool=tool.tool_number,
+            turret_station=active_station,
+            tool_x_offset_mm=tool.x_offset_mm,
+            tool_z_offset_mm=tool.z_offset_mm,
+            pending_tool=None,
+            pending_turret_station=None,
+            status_message=(
+                f"Active tool T{tool.tool_number}"
+                + (f" station {active_station}" if active_station is not None else "")
+            ),
+        )
+        return True
+
+    def set_active_tool(self, tool_number: int) -> bool:
+        tool = self.tool_table.get(tool_number)
+        if tool is None:
+            self._mark_rejected(f"T{tool_number} is not in the tool table")
+            return False
+        return self.confirm_tool_change(tool.tool_number, tool.station)
+
+    def update_tool_table(self, table: ToolTable) -> None:
+        self.tool_table = table
+        active = self.tool_table.get(self.state.active_tool)
+        if active is not None:
+            self.state = replace(
+                self.state,
+                turret_station=active.station,
+                tool_x_offset_mm=active.x_offset_mm,
+                tool_z_offset_mm=active.z_offset_mm,
+            )
+
+    def _merge_tool_state(self, backend_state: MachineState) -> MachineState:
+        return replace(
+            backend_state,
+            active_tool=self.state.active_tool,
+            turret_station=self.state.turret_station,
+            tool_x_offset_mm=self.state.tool_x_offset_mm,
+            tool_z_offset_mm=self.state.tool_z_offset_mm,
+            pending_tool=self.state.pending_tool,
+            pending_turret_station=self.state.pending_turret_station,
+        )
+
+    @staticmethod
+    def _tool_state_kwargs(state: MachineState) -> dict[str, object]:
+        return {
+            "active_tool": state.active_tool,
+            "turret_station": state.turret_station,
+            "tool_x_offset_mm": state.tool_x_offset_mm,
+            "tool_z_offset_mm": state.tool_z_offset_mm,
+            "pending_tool": state.pending_tool,
+            "pending_turret_station": state.pending_turret_station,
+        }
 
     def _mark_rejected(self, message: str) -> None:
         self.state = replace(self.state, status_message=message)

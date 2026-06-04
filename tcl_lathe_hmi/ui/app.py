@@ -26,6 +26,8 @@ from tcl_lathe_hmi.gcode import (
     parse_gcode,
 )
 from tcl_lathe_hmi.machine import MachineService, MachineState
+from tcl_lathe_hmi.tools import ToolRecord, ToolTable
+from tcl_lathe_hmi.ui.keypad import NumberEntryButton
 
 
 BG = (0.07, 0.08, 0.09, 1)
@@ -103,10 +105,11 @@ class ManualPanel(BoxLayout):
         self.on_backend_change = on_backend_change
         self.increment_mm = JOG_INCREMENTS_MM[1]
         self.jog_mode = "feed"
-        self.command_widgets: list[Button | ToggleButton | TextInput] = []
+        self.command_widgets: list[Button | ToggleButton | TextInput | NumberEntryButton] = []
         self.current_view = "manual"
         self.manual_work: BoxLayout | None = None
         self.program_panel: ProgramPanel | None = None
+        self.tools_panel: ToolsPanel | None = None
         self.work_container: BoxLayout | None = None
 
         paint(self, BG)
@@ -121,6 +124,7 @@ class ManualPanel(BoxLayout):
         self.work_container = BoxLayout(orientation="vertical", size_hint_x=0.62)
         self.manual_work = self._build_manual_work()
         self.program_panel = ProgramPanel(service=self.service, config=self.config)
+        self.tools_panel = ToolsPanel(service=self.service)
         self.work_container.add_widget(self.manual_work)
         body.add_widget(self.work_container)
         self.add_widget(body)
@@ -270,7 +274,12 @@ class ManualPanel(BoxLayout):
         row.add_widget(feed)
         row.add_widget(rapid)
 
-        self.feed_input = numeric_input(str(self.config.jog_feed), width=120)
+        self.feed_input = numeric_input(
+            str(self.config.jog_feed),
+            width=120,
+            integer=True,
+            title_text="Feed Rate",
+        )
         self.command_widgets.append(self.feed_input)
         row.add_widget(Label(text="F", color=MUTED, font_size=24, size_hint_x=None, width=30))
         row.add_widget(self.feed_input)
@@ -320,7 +329,11 @@ class ManualPanel(BoxLayout):
 
         target = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=0.36)
         target.add_widget(Label(text="Target", color=MUTED, font_size=24, size_hint_x=0.45))
-        self.rpm_input = numeric_input(str(int(self.config.default_spindle_rpm)))
+        self.rpm_input = numeric_input(
+            str(int(self.config.default_spindle_rpm)),
+            integer=True,
+            title_text="Spindle RPM",
+        )
         self.command_widgets.append(self.rpm_input)
         target.add_widget(self.rpm_input)
         box.add_widget(target)
@@ -350,10 +363,13 @@ class ManualPanel(BoxLayout):
         program.bind(on_release=lambda *_: self._show_view("program"))
         nav.add_widget(program)
 
-        for label in ("Tools", "Setup"):
-            btn = action_button(label, BUTTON)
-            btn.disabled = True
-            nav.add_widget(btn)
+        tools = action_button("Tools", BUTTON)
+        tools.bind(on_release=lambda *_: self._show_view("tools"))
+        nav.add_widget(tools)
+
+        setup = action_button("Setup", BUTTON)
+        setup.disabled = True
+        nav.add_widget(setup)
         return nav
 
     def refresh(self, state: MachineState | None = None) -> None:
@@ -364,17 +380,27 @@ class ManualPanel(BoxLayout):
         self.connect_button.text = "Clear Error" if state.error else ("Disconnect" if state.connected else "Connect")
         self.connect_button.background_color = RED if state.error else (AMBER if state.connected else BLUE)
 
-        self.x_value.text = f"{state.x_mm:+0.3f}"
-        self.z_value.text = f"{state.z_mm:+0.3f}"
-        self.x_detail.text = f"counts {state.x_counts if state.x_counts is not None else '--'}"
-        self.z_detail.text = f"counts {state.z_counts if state.z_counts is not None else '--'}"
+        self.x_value.text = f"{state.work_x_mm:+0.3f}"
+        self.z_value.text = f"{state.work_z_mm:+0.3f}"
+        self.x_detail.text = (
+            f"machine {state.x_mm:+0.3f}\n"
+            f"offset {state.tool_x_offset_mm:+0.3f}\n"
+            f"counts {state.x_counts if state.x_counts is not None else '--'}"
+        )
+        self.z_detail.text = (
+            f"machine {state.z_mm:+0.3f}\n"
+            f"offset {state.tool_z_offset_mm:+0.3f}\n"
+            f"counts {state.z_counts if state.z_counts is not None else '--'}"
+        )
 
         self.rpm_value.text = f"{state.spindle.actual_rpm:0.0f}"
         speed_label = "AT SPEED" if state.spindle.at_speed else "RAMP"
         self.rpm_detail.text = f"{state.spindle.direction_label}\nS {state.spindle.target_rpm:0.0f}\n{speed_label}"
         self.rpm_detail.color = GREEN if state.spindle.at_speed else AMBER
 
-        self.tool_label.text = f"T{state.active_tool}"
+        station = "--" if state.turret_station is None else str(state.turret_station)
+        pending = "" if state.pending_tool is None else f" -> T{state.pending_tool}"
+        self.tool_label.text = f"T{state.active_tool} P{station}{pending}"
         self.home_label.text = f"HOME {'X' if state.homed_x else '-'}{'Z' if state.homed_z else '-'}"
         self.home_label.color = GREEN if state.homed_x and state.homed_z else MUTED
 
@@ -383,14 +409,24 @@ class ManualPanel(BoxLayout):
 
         if self.program_panel is not None:
             self.program_panel.refresh(state)
+        if self.tools_panel is not None:
+            self.tools_panel.refresh(state)
 
     def _show_view(self, view_name: str) -> None:
-        if self.work_container is None or self.manual_work is None or self.program_panel is None:
+        if (
+            self.work_container is None
+            or self.manual_work is None
+            or self.program_panel is None
+            or self.tools_panel is None
+        ):
             return
         self.work_container.clear_widgets()
         if view_name == "program":
             self.work_container.add_widget(self.program_panel)
             self.current_view = "program"
+        elif view_name == "tools":
+            self.work_container.add_widget(self.tools_panel)
+            self.current_view = "tools"
         else:
             self.work_container.add_widget(self.manual_work)
             self.current_view = "manual"
@@ -452,6 +488,7 @@ class ProgramPanel(BoxLayout):
         self.running = False
         self.execution_index = 0
         self.waiting_for_idle = False
+        self.waiting_for_tool = False
         self.history: list[str] = []
 
         paint(self, PANEL)
@@ -564,8 +601,8 @@ class ProgramPanel(BoxLayout):
         try:
             result = parse_gcode(
                 self.editor.text,
-                start_x_mm=self.service.state.x_mm,
-                start_z_mm=self.service.state.z_mm,
+                start_x_mm=self.service.state.work_x_mm,
+                start_z_mm=self.service.state.work_z_mm,
             )
         except GCodeParseError as exc:
             self.actions = []
@@ -577,8 +614,8 @@ class ProgramPanel(BoxLayout):
         self.actions = result.actions
         preview_path = build_preview(
             self.actions,
-            start_x_mm=self.service.state.x_mm,
-            start_z_mm=self.service.state.z_mm,
+            start_x_mm=self.service.state.work_x_mm,
+            start_z_mm=self.service.state.work_z_mm,
         )
         self.preview.set_preview(preview_path)
         move_count = len(preview_path.segments)
@@ -611,8 +648,8 @@ class ProgramPanel(BoxLayout):
         try:
             result = parse_gcode(
                 text,
-                start_x_mm=self.service.state.x_mm,
-                start_z_mm=self.service.state.z_mm,
+                start_x_mm=self.service.state.work_x_mm,
+                start_z_mm=self.service.state.work_z_mm,
             )
         except GCodeParseError as exc:
             self.actions = []
@@ -628,13 +665,14 @@ class ProgramPanel(BoxLayout):
         self.preview.set_preview(
             build_preview(
                 self.actions,
-                start_x_mm=self.service.state.x_mm,
-                start_z_mm=self.service.state.z_mm,
+                start_x_mm=self.service.state.work_x_mm,
+                start_z_mm=self.service.state.work_z_mm,
             )
         )
         self.running = True
         self.execution_index = 0
         self.waiting_for_idle = False
+        self.waiting_for_tool = False
         self.program_status.text = f"{label}: running {len(self.actions)} action(s)"
         self.program_status.color = GREEN
         self._advance_execution(self.service.state)
@@ -643,6 +681,20 @@ class ProgramPanel(BoxLayout):
         if state.error or not state.connected:
             self._stop_program("Program stopped: machine unavailable")
             return
+        if self.waiting_for_tool:
+            if state.pending_tool is not None:
+                self.program_status.text = (
+                    f"Waiting for tool confirmation: T{state.pending_tool}"
+                    + (
+                        ""
+                        if state.pending_turret_station is None
+                        else f" station {state.pending_turret_station}"
+                    )
+                )
+                self.program_status.color = AMBER
+                return
+            self.execution_index += 1
+            self.waiting_for_tool = False
         if state.busy:
             self.waiting_for_idle = True
             return
@@ -662,6 +714,11 @@ class ProgramPanel(BoxLayout):
                 f"{self.execution_index + 1}/{len(self.actions)}"
             )
             if not ok:
+                if self.service.state.pending_tool is not None:
+                    self.waiting_for_tool = True
+                    self.program_status.text = self.service.state.status_message
+                    self.program_status.color = AMBER
+                    return
                 self._stop_program(self.service.state.status_message)
                 return
             if self.service.state.busy:
@@ -677,6 +734,7 @@ class ProgramPanel(BoxLayout):
     def _stop_program(self, message: str) -> None:
         self.running = False
         self.waiting_for_idle = False
+        self.waiting_for_tool = False
         self.program_status.text = message
         self.program_status.color = AMBER if "stopped" in message.lower() else RED
 
@@ -702,6 +760,210 @@ class ProgramPanel(BoxLayout):
             return
         self.program_status.text = f"Saved {path}"
         self.program_status.color = TEXT
+
+
+class ToolsPanel(BoxLayout):
+    def __init__(self, *, service: MachineService, **kwargs):
+        super().__init__(orientation="horizontal", spacing=10, **kwargs)
+        self.service = service
+        paint(self, PANEL)
+        self._build()
+        self._export_to_editor()
+
+    def _build(self) -> None:
+        table_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.56)
+        paint(table_side, PANEL_ALT)
+        table_side.add_widget(section_label("Tool Table"))
+
+        self.table_editor = TextInput(
+            text="",
+            multiline=True,
+            font_size=17,
+            foreground_color=TEXT,
+            background_color=(0.05, 0.05, 0.05, 1),
+            cursor_color=TEXT,
+        )
+        table_side.add_widget(self.table_editor)
+
+        path_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=54)
+        self.tool_path_input = TextInput(
+            text="lathe.tbl",
+            multiline=False,
+            font_size=20,
+            foreground_color=TEXT,
+            background_color=(0.06, 0.06, 0.06, 1),
+            cursor_color=TEXT,
+            padding=(8, 10, 8, 8),
+        )
+        load = action_button("Load", BUTTON, width=90)
+        save = action_button("Save", BUTTON, width=90)
+        import_btn = action_button("Import Text", BLUE, width=140)
+        load.bind(on_release=lambda *_: self._load_table())
+        save.bind(on_release=lambda *_: self._save_table())
+        import_btn.bind(on_release=lambda *_: self._import_from_editor())
+        path_row.add_widget(self.tool_path_input)
+        path_row.add_widget(load)
+        path_row.add_widget(save)
+        path_row.add_widget(import_btn)
+        table_side.add_widget(path_row)
+        self.add_widget(table_side)
+
+        edit_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.44)
+        paint(edit_side, PANEL_ALT)
+        edit_side.add_widget(section_label("Offsets / Change"))
+
+        self.active_label = status_text("Active T0 P--")
+        self.pending_label = status_text("No pending tool change")
+        edit_side.add_widget(self.active_label)
+        edit_side.add_widget(self.pending_label)
+
+        grid = GridLayout(cols=2, spacing=8, size_hint_y=None, height=270)
+        self.tool_input = field_input("1", integer=True, title_text="Tool")
+        self.station_input = field_input("1", integer=True, title_text="Station")
+        self.x_offset_input = field_input("0.0", title_text="X Offset")
+        self.z_offset_input = field_input("0.0", title_text="Z Offset")
+        self.diameter_input = field_input("0.0", title_text="Diameter")
+        self.comment_input = text_field("")
+        for label, widget in (
+            ("Tool T", self.tool_input),
+            ("Station P", self.station_input),
+            ("X offset", self.x_offset_input),
+            ("Z offset", self.z_offset_input),
+            ("Diameter D", self.diameter_input),
+            ("Comment", self.comment_input),
+        ):
+            grid.add_widget(Label(text=label, color=MUTED, font_size=20))
+            grid.add_widget(widget)
+        edit_side.add_widget(grid)
+
+        row1 = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        upsert = action_button("Upsert Tool", BLUE)
+        set_active = action_button("Set Active", GREEN)
+        upsert.bind(on_release=lambda *_: self._upsert_tool())
+        set_active.bind(on_release=lambda *_: self._set_active_tool())
+        row1.add_widget(upsert)
+        row1.add_widget(set_active)
+        edit_side.add_widget(row1)
+
+        row2 = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        confirm = action_button("Confirm Pending", GREEN)
+        auto = action_button("Auto Turret N/A", BUTTON)
+        auto.disabled = True
+        confirm.bind(on_release=lambda *_: self._confirm_pending_tool())
+        row2.add_widget(confirm)
+        row2.add_widget(auto)
+        edit_side.add_widget(row2)
+
+        self.tool_status = status_text("Tool table ready")
+        edit_side.add_widget(self.tool_status)
+        self.add_widget(edit_side)
+
+    def refresh(self, state: MachineState) -> None:
+        station = "--" if state.turret_station is None else str(state.turret_station)
+        self.active_label.text = (
+            f"Active T{state.active_tool} P{station}  "
+            f"Xoff {state.tool_x_offset_mm:+0.3f}  Zoff {state.tool_z_offset_mm:+0.3f}"
+        )
+        if state.pending_tool is None:
+            self.pending_label.text = "No pending tool change"
+            self.pending_label.color = MUTED
+        else:
+            pending_station = (
+                "--"
+                if state.pending_turret_station is None
+                else str(state.pending_turret_station)
+            )
+            self.pending_label.text = f"Pending T{state.pending_tool} P{pending_station}"
+            self.pending_label.color = AMBER
+
+    def _upsert_tool(self) -> None:
+        try:
+            tool = self._tool_from_fields()
+            self.service.tool_table.upsert(tool)
+        except ValueError as exc:
+            self._set_status(f"Tool edit failed: {exc}", RED)
+            return
+        self._export_to_editor()
+        self._set_status(f"Saved {tool.display_name}", TEXT)
+
+    def _set_active_tool(self) -> None:
+        try:
+            tool_number = int(parse_number(self.tool_input.text, -1))
+        except ValueError:
+            self._set_status("Invalid tool number", RED)
+            return
+        if self.service.set_active_tool(tool_number):
+            self._set_status(self.service.state.status_message, GREEN)
+        else:
+            self._set_status(self.service.state.status_message, RED)
+        self.refresh(self.service.state)
+
+    def _confirm_pending_tool(self) -> None:
+        state = self.service.state
+        if state.pending_tool is None:
+            self._set_status("No pending tool change", AMBER)
+            return
+        if self.service.confirm_tool_change(state.pending_tool, state.pending_turret_station):
+            self._set_status(self.service.state.status_message, GREEN)
+        else:
+            self._set_status(self.service.state.status_message, RED)
+        self.refresh(self.service.state)
+
+    def _import_from_editor(self) -> bool:
+        try:
+            table = ToolTable.from_linuxcnc(self.table_editor.text)
+        except ValueError as exc:
+            self._set_status(f"Import failed: {exc}", RED)
+            return False
+        self.service.update_tool_table(table)
+        self._export_to_editor()
+        self._set_status(f"Imported {len(table.tools)} tool(s)", TEXT)
+        self.refresh(self.service.state)
+        return True
+
+    def _export_to_editor(self) -> None:
+        self.table_editor.text = self.service.tool_table.export_linuxcnc()
+
+    def _load_table(self) -> None:
+        path = Path(self.tool_path_input.text).expanduser()
+        try:
+            table = ToolTable.load(path)
+        except (OSError, ValueError) as exc:
+            self._set_status(f"Load failed: {exc}", RED)
+            return
+        self.service.update_tool_table(table)
+        self._export_to_editor()
+        self._set_status(f"Loaded {path}", TEXT)
+        self.refresh(self.service.state)
+
+    def _save_table(self) -> None:
+        if not self._import_from_editor():
+            return
+        path = Path(self.tool_path_input.text).expanduser()
+        try:
+            self.service.tool_table.save(path)
+        except OSError as exc:
+            self._set_status(f"Save failed: {exc}", RED)
+            return
+        self._set_status(f"Saved {path}", TEXT)
+
+    def _tool_from_fields(self) -> ToolRecord:
+        tool_number = int(parse_number(self.tool_input.text, -1))
+        if tool_number < 0:
+            raise ValueError("tool number must be non-negative")
+        station = optional_int(self.station_input.text)
+        return ToolRecord(
+            tool_number=tool_number,
+            station=station,
+            x_offset_mm=parse_number(self.x_offset_input.text, 0.0),
+            z_offset_mm=parse_number(self.z_offset_input.text, 0.0),
+            diameter_mm=parse_number(self.diameter_input.text, 0.0),
+            comment=self.comment_input.text.strip(),
+        )
+
+    def _set_status(self, message: str, color) -> None:
+        self.tool_status.text = message
+        self.tool_status.color = color
 
 
 class PreviewCanvas(Widget):
@@ -803,22 +1065,63 @@ def toggle_button(text: str, *, group: str) -> ToggleButton:
     )
 
 
-def numeric_input(text: str, *, width: int | None = None) -> TextInput:
+def numeric_input(
+    text: str,
+    *,
+    width: int | None = None,
+    integer: bool = False,
+    title_text: str = "Number",
+) -> NumberEntryButton:
     kwargs = {}
     if width is not None:
         kwargs = {"size_hint_x": None, "width": width}
+    return NumberEntryButton(
+        text=text,
+        integer=integer,
+        title_text=title_text,
+        font_size=28,
+        **kwargs,
+    )
+
+
+def field_input(
+    text: str,
+    *,
+    integer: bool = False,
+    title_text: str = "Number",
+) -> NumberEntryButton:
+    return NumberEntryButton(
+        text=text,
+        integer=integer,
+        title_text=title_text,
+        font_size=20,
+    )
+
+
+def text_field(text: str) -> TextInput:
     return TextInput(
         text=text,
         multiline=False,
-        input_filter="float",
-        font_size=28,
-        halign="right",
+        font_size=20,
         foreground_color=TEXT,
         background_color=(0.06, 0.06, 0.06, 1),
         cursor_color=TEXT,
-        padding=(8, 10, 8, 8),
-        **kwargs,
+        padding=(8, 8, 8, 8),
     )
+
+
+def status_text(text: str) -> Label:
+    label = Label(
+        text=text,
+        color=MUTED,
+        font_size=18,
+        halign="left",
+        valign="middle",
+        size_hint_y=None,
+        height=42,
+    )
+    label.bind(size=lambda widget, *_: setattr(widget, "text_size", widget.size))
+    return label
 
 
 def axis_label(text: str, *, width: int) -> Label:
@@ -850,3 +1153,10 @@ def parse_number(value: str, default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+def optional_int(value: str) -> int | None:
+    text = value.strip()
+    if not text:
+        return None
+    return int(float(text))

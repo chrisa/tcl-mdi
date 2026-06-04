@@ -37,6 +37,18 @@ class MachineState:
     homed_z: bool = False
     active_tool: int = 0
     turret_station: int | None = None
+    tool_x_offset_mm: float = 0.0
+    tool_z_offset_mm: float = 0.0
+    pending_tool: int | None = None
+    pending_turret_station: int | None = None
+
+    @property
+    def work_x_mm(self) -> float:
+        return self.x_mm + self.tool_x_offset_mm
+
+    @property
+    def work_z_mm(self) -> float:
+        return self.z_mm + self.tool_z_offset_mm
 
     @property
     def can_accept_commands(self) -> bool:

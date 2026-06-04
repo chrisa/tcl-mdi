@@ -108,7 +108,12 @@ class ManualPanel(BoxLayout):
         self.config = config
         self.on_backend_change = on_backend_change
         self.increment_mm = JOG_INCREMENTS_MM[1]
+        self.custom_increment_mm = self.increment_mm
+        self.use_custom_increment = False
         self.jog_mode = "feed"
+        self.queued_jog_x_mm = 0.0
+        self.queued_jog_z_mm = 0.0
+        self.queued_jog_event = None
         self.command_widgets: list[DebouncedButton | DebouncedToggleButton | TextInput | NumberEntryButton] = []
         self.jog_increment_buttons: list[DebouncedToggleButton] = []
         self.jog_mode_buttons: list[DebouncedToggleButton] = []
@@ -278,6 +283,26 @@ class ManualPanel(BoxLayout):
             increments.add_widget(btn)
         box.add_widget(increments)
 
+        custom_row = BoxLayout(orientation="horizontal", spacing=8)
+        self.custom_increment_button = toggle_button("Custom", group="jog_increment")
+        self.custom_increment_button.bind(on_release=self._set_custom_increment)
+        self.custom_increment_button.bind(state=lambda button, _state: self._style_toggle(button))
+        self._style_toggle(self.custom_increment_button)
+        self.jog_increment_buttons.append(self.custom_increment_button)
+        self.command_widgets.append(self.custom_increment_button)
+        custom_row.add_widget(self.custom_increment_button)
+
+        self.custom_increment_input = numeric_input(
+            f"{self.custom_increment_mm:0.3f}",
+            width=150,
+            title_text="Jog Distance",
+            on_value=self._custom_increment_changed,
+        )
+        self.command_widgets.append(self.custom_increment_input)
+        custom_row.add_widget(Label(text="mm", color=MUTED, font_size=24, size_hint_x=None, width=48))
+        custom_row.add_widget(self.custom_increment_input)
+        box.add_widget(custom_row)
+
         row = BoxLayout(orientation="horizontal", spacing=8)
         feed = toggle_button("Feed", group="jog_mode")
         feed.state = "down"
@@ -336,7 +361,7 @@ class ManualPanel(BoxLayout):
 
         z_plus.bind(on_release=lambda *_: self._jog(z_sign=1.0))
         x_minus.bind(on_release=lambda *_: self._jog(x_sign=-1.0))
-        stop.bind(on_release=lambda *_: self._set_status("Stop requested; no abort primitive yet"))
+        stop.bind(on_release=lambda *_: self._stop_jog())
         x_plus.bind(on_release=lambda *_: self._jog(x_sign=1.0))
         z_minus.bind(on_release=lambda *_: self._jog(z_sign=-1.0))
         return grid
@@ -473,6 +498,29 @@ class ManualPanel(BoxLayout):
     def _set_increment(self, button: DebouncedToggleButton, value: float) -> None:
         if button.state == "down":
             self.increment_mm = value
+            self.use_custom_increment = False
+
+    def _set_custom_increment(self, button: DebouncedToggleButton) -> None:
+        if button.state == "down":
+            self.use_custom_increment = True
+            self.custom_increment_mm = self._current_custom_increment()
+
+    def _custom_increment_changed(self, value: float | int) -> None:
+        self.custom_increment_mm = abs(float(value))
+        self.custom_increment_button.state = "down"
+        self.use_custom_increment = True
+
+    def _current_custom_increment(self) -> float:
+        value = abs(parse_number(self.custom_increment_input.text, self.custom_increment_mm))
+        if value == 0.0:
+            return self.custom_increment_mm
+        return value
+
+    def _current_jog_increment(self) -> float:
+        if not self.use_custom_increment:
+            return self.increment_mm
+        self.custom_increment_mm = self._current_custom_increment()
+        return self.custom_increment_mm
 
     def _set_jog_mode(self, button: DebouncedToggleButton, mode: str) -> None:
         if button.state == "down":
@@ -487,17 +535,53 @@ class ManualPanel(BoxLayout):
             button.color = TEXT
 
     def _jog(self, *, x_sign: float = 0.0, z_sign: float = 0.0) -> None:
+        increment_mm = self._current_jog_increment()
+        self.queued_jog_x_mm += x_sign * increment_mm
+        self.queued_jog_z_mm += z_sign * increment_mm
+        if self.queued_jog_event is not None:
+            self.queued_jog_event.cancel()
+        self.queued_jog_event = Clock.schedule_once(
+            self._flush_queued_jog,
+            self.config.jog_accumulate_delay_s,
+        )
+        self._set_status(
+            f"Queued jog X {self.queued_jog_x_mm:+0.3f} Z {self.queued_jog_z_mm:+0.3f}"
+        )
+
+    def _flush_queued_jog(self, _dt) -> None:
+        x_mm = self.queued_jog_x_mm
+        z_mm = self.queued_jog_z_mm
+        self.queued_jog_x_mm = 0.0
+        self.queued_jog_z_mm = 0.0
+        self.queued_jog_event = None
+
+        if abs(x_mm) < 1e-9 and abs(z_mm) < 1e-9:
+            self._set_status("Queued jog cancelled")
+            return
+
         feed = int(parse_number(self.feed_input.text, self.config.jog_feed))
         ok = self.service.jog_delta(
-            x_mm=x_sign * self.increment_mm,
-            z_mm=z_sign * self.increment_mm,
+            x_mm=x_mm,
+            z_mm=z_mm,
             mode=self.jog_mode,
             feed=feed,
             slew=self.config.jog_slew,
         )
         if not ok:
             self._set_status(self.service.state.status_message, flash=True)
+        else:
+            self._set_status(f"Jog sent X {x_mm:+0.3f} Z {z_mm:+0.3f}")
         self.refresh(self.service.state)
+
+    def _stop_jog(self) -> None:
+        if self.queued_jog_event is not None:
+            self.queued_jog_event.cancel()
+            self.queued_jog_event = None
+            self.queued_jog_x_mm = 0.0
+            self.queued_jog_z_mm = 0.0
+            self._set_status("Queued jog cancelled")
+            return
+        self._set_status("Stop requested; no abort primitive yet")
 
     def _spindle(self, *, on: bool, forward: bool) -> None:
         rpm = parse_number(self.rpm_input.text, self.config.default_spindle_rpm)
@@ -1367,6 +1451,7 @@ def numeric_input(
     width: int | None = None,
     integer: bool = False,
     title_text: str = "Number",
+    on_value: Callable[[float | int], None] | None = None,
 ) -> NumberEntryButton:
     kwargs = {}
     if width is not None:
@@ -1375,6 +1460,7 @@ def numeric_input(
         text=text,
         integer=integer,
         title_text=title_text,
+        on_value=on_value,
         font_size=28,
         **kwargs,
     )

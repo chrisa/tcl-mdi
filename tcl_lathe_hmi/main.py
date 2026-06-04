@@ -12,6 +12,16 @@ def main(argv: list[str] | None = None) -> int:
         default="sim",
         help="machine backend to use at startup",
     )
+    parser.add_argument(
+        "--windowed",
+        action="store_true",
+        help="run in a normal window instead of taking over the display",
+    )
+    parser.add_argument(
+        "--show-cursor",
+        action="store_true",
+        help="show the mouse cursor",
+    )
     raw_args = sys.argv[1:] if argv is None else list(argv)
     if raw_args and raw_args[0] == "--":
         raw_args = raw_args[1:]
@@ -22,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
     # by Kivy's parser.
     if argv is None:
         sys.argv = [sys.argv[0]]
+
+    _configure_kivy(fullscreen=not args.windowed, show_cursor=args.show_cursor)
 
     try:
         from tcl_lathe_hmi.ui.app import TclLatheHmiApp
@@ -37,3 +49,15 @@ def main(argv: list[str] | None = None) -> int:
 
     TclLatheHmiApp(backend_name=args.backend).run()
     return 0
+
+
+def _configure_kivy(*, fullscreen: bool, show_cursor: bool) -> None:
+    from kivy.config import Config
+
+    Config.set("graphics", "fullscreen", "auto" if fullscreen else "0")
+    Config.set("graphics", "borderless", "1" if fullscreen else "0")
+    Config.set("graphics", "show_cursor", "1" if show_cursor else "0")
+    # Many touchscreens also emit mouse compatibility events. This prevents
+    # duplicate mouse events after real touch activity while preserving normal
+    # mouse use on development machines.
+    Config.set("input", "mouse", "mouse,disable_on_activity")

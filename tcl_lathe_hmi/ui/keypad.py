@@ -5,9 +5,10 @@ from collections.abc import Callable
 from kivy.core.window import Window
 from kivy.properties import BooleanProperty, NumericProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
+
+from tcl_lathe_hmi.ui.widgets import DebouncedButton
 
 
 TEXT = (0.93, 0.94, 0.92, 1)
@@ -19,7 +20,7 @@ RED = (0.64, 0.18, 0.18, 1)
 AMBER = (0.78, 0.52, 0.14, 1)
 
 
-class NumberEntryButton(Button):
+class NumberEntryButton(DebouncedButton):
     """Touch-friendly numeric input that opens a modal keypad."""
 
     value = NumericProperty(0.0)
@@ -133,11 +134,11 @@ class NumberEntryPopup(Popup):
         *,
         color=BUTTON,
         width: int | None = None,
-    ) -> Button:
+    ) -> DebouncedButton:
         kwargs = {}
         if width is not None:
             kwargs = {"size_hint_x": None, "width": width}
-        button = Button(
+        button = DebouncedButton(
             text=text,
             font_size=28,
             bold=True,
@@ -170,7 +171,7 @@ class NumberEntryPopup(Popup):
         self.value_label.text = self.old_text
         self._replace_on_next_digit = True
 
-    def add_text(self, button: Button) -> None:
+    def add_text(self, button: DebouncedButton) -> None:
         self._append_token(button.text)
 
     def dot_key(self, *_args) -> None:

@@ -8,12 +8,10 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.graphics import Color, Line, Rectangle
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
-from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.widget import Widget
 
 from tcl_lathe_hmi.backends import create_backend
@@ -29,6 +27,7 @@ from tcl_lathe_hmi.gcode import (
 from tcl_lathe_hmi.machine import MachineService, MachineState
 from tcl_lathe_hmi.tools import ToolRecord, ToolTable
 from tcl_lathe_hmi.ui.keypad import NumberEntryButton
+from tcl_lathe_hmi.ui.widgets import DebouncedButton, DebouncedToggleButton
 
 
 BG = (0.07, 0.08, 0.09, 1)
@@ -110,9 +109,9 @@ class ManualPanel(BoxLayout):
         self.on_backend_change = on_backend_change
         self.increment_mm = JOG_INCREMENTS_MM[1]
         self.jog_mode = "feed"
-        self.command_widgets: list[Button | ToggleButton | TextInput | NumberEntryButton] = []
-        self.jog_increment_buttons: list[ToggleButton] = []
-        self.jog_mode_buttons: list[ToggleButton] = []
+        self.command_widgets: list[DebouncedButton | DebouncedToggleButton | TextInput | NumberEntryButton] = []
+        self.jog_increment_buttons: list[DebouncedToggleButton] = []
+        self.jog_mode_buttons: list[DebouncedToggleButton] = []
         self.current_view = "manual"
         self.manual_work: BoxLayout | None = None
         self.program_panel: ProgramPanel | None = None
@@ -315,7 +314,7 @@ class ManualPanel(BoxLayout):
         stop = action_button("STOP", RED)
         x_plus = jog_button("X+")
         z_minus = jog_button("Z-")
-        buttons: list[Button | None] = [
+        buttons: list[DebouncedButton | None] = [
             None,
             z_plus,
             None,
@@ -471,15 +470,15 @@ class ManualPanel(BoxLayout):
             self.service.connect()
         self.refresh(self.service.state)
 
-    def _set_increment(self, button: ToggleButton, value: float) -> None:
+    def _set_increment(self, button: DebouncedToggleButton, value: float) -> None:
         if button.state == "down":
             self.increment_mm = value
 
-    def _set_jog_mode(self, button: ToggleButton, mode: str) -> None:
+    def _set_jog_mode(self, button: DebouncedToggleButton, mode: str) -> None:
         if button.state == "down":
             self.jog_mode = mode
 
-    def _style_toggle(self, button: ToggleButton) -> None:
+    def _style_toggle(self, button: DebouncedToggleButton) -> None:
         if button.state == "down":
             button.background_color = GREEN
             button.color = TEXT
@@ -1329,11 +1328,11 @@ def paint(widget, color) -> None:
     widget.bind(pos=update_rect, size=update_rect)
 
 
-def action_button(text: str, color, *, width: int | None = None) -> Button:
+def action_button(text: str, color, *, width: int | None = None) -> DebouncedButton:
     kwargs = {}
     if width is not None:
         kwargs = {"size_hint_x": None, "width": width}
-    return Button(
+    return DebouncedButton(
         text=text,
         font_size=22,
         bold=True,
@@ -1344,14 +1343,15 @@ def action_button(text: str, color, *, width: int | None = None) -> Button:
     )
 
 
-def jog_button(text: str) -> Button:
+def jog_button(text: str) -> DebouncedButton:
     return action_button(text, BLUE)
 
 
-def toggle_button(text: str, *, group: str) -> ToggleButton:
-    return ToggleButton(
+def toggle_button(text: str, *, group: str) -> DebouncedToggleButton:
+    return DebouncedToggleButton(
         text=text,
         group=group,
+        allow_no_selection=False,
         font_size=20,
         bold=True,
         color=TEXT,

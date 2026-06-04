@@ -1,0 +1,3 @@
+[submodule "vendor/LibLathe"]
+	path = vendor/LibLathe
+	url = https://github.com/dubstar-04/LibLathe.git

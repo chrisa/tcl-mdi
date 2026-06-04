@@ -74,22 +74,46 @@ def parse_gcode(
                     actions.append(action)
 
         if "X" in letters or "Z" in letters:
+            start_x = state.x_mm
+            start_z = state.z_mm
             target_x = _target_for_axis(words, "X", state.x_mm, state)
             target_z = _target_for_axis(words, "Z", state.z_mm, state)
             state.x_mm = target_x
             state.z_mm = target_z
-            actions.append(
-                MoveAction(
-                    line_number=line_number,
-                    mode="rapid" if state.motion_mode == "rapid" else "feed",
-                    target_x_mm=target_x,
-                    target_z_mm=target_z,
-                    feed=state.feed,
-                    source=raw_line,
-                )
-            )
 
-        unsupported = sorted(letters - {"G", "M", "X", "Z", "F", "S", "T", "K", "N"})
+            if state.motion_mode in {"arc_cw", "arc_ccw"}:
+                for point_x, point_z in _linearized_arc_points(
+                    words,
+                    start_x,
+                    start_z,
+                    target_x,
+                    target_z,
+                    state,
+                    clockwise=state.motion_mode == "arc_cw",
+                ):
+                    actions.append(
+                        MoveAction(
+                            line_number=line_number,
+                            mode="feed",
+                            target_x_mm=point_x,
+                            target_z_mm=point_z,
+                            feed=state.feed,
+                            source=raw_line,
+                        )
+                    )
+            else:
+                actions.append(
+                    MoveAction(
+                        line_number=line_number,
+                        mode="rapid" if state.motion_mode == "rapid" else "feed",
+                        target_x_mm=target_x,
+                        target_z_mm=target_z,
+                        feed=state.feed,
+                        source=raw_line,
+                    )
+                )
+
+        unsupported = sorted(letters - {"G", "M", "X", "Z", "I", "K", "F", "S", "T", "N"})
         if unsupported:
             raise GCodeParseError(
                 line_number,
@@ -128,6 +152,10 @@ def _handle_g(line_number: int, value: float, state: _ParserState) -> None:
         state.motion_mode = "rapid"
     elif code == 1:
         state.motion_mode = "feed"
+    elif code == 2:
+        state.motion_mode = "arc_cw"
+    elif code == 3:
+        state.motion_mode = "arc_ccw"
     elif code == 18:
         return
     elif code == 20:
@@ -190,6 +218,56 @@ def _target_for_axis(
                 return axis_mm
             return current_mm + axis_mm
     return current_mm
+
+
+def _linearized_arc_points(
+    words: list[tuple[str, float]],
+    start_x: float,
+    start_z: float,
+    target_x: float,
+    target_z: float,
+    state: _ParserState,
+    *,
+    clockwise: bool,
+) -> list[tuple[float, float]]:
+    import math
+
+    center_x = start_x + _offset_word(words, "I", state)
+    center_z = start_z + _offset_word(words, "K", state)
+    start_angle = math.atan2(start_z - center_z, start_x - center_x)
+    end_angle = math.atan2(target_z - center_z, target_x - center_x)
+    radius = math.hypot(start_x - center_x, start_z - center_z)
+    target_radius = math.hypot(target_x - center_x, target_z - center_z)
+    if radius <= 1e-9 or abs(radius - target_radius) > max(0.25, radius * 0.05):
+        return [(target_x, target_z)]
+
+    if clockwise:
+        if end_angle >= start_angle:
+            end_angle -= math.tau
+    elif end_angle <= start_angle:
+        end_angle += math.tau
+
+    sweep = end_angle - start_angle
+    arc_length = abs(sweep) * radius
+    steps = max(1, min(180, math.ceil(arc_length / 0.5)))
+    return [
+        (
+            center_x + math.cos(start_angle + sweep * (index / steps)) * radius,
+            center_z + math.sin(start_angle + sweep * (index / steps)) * radius,
+        )
+        for index in range(1, steps + 1)
+    ]
+
+
+def _offset_word(
+    words: list[tuple[str, float]],
+    axis: str,
+    state: _ParserState,
+) -> float:
+    for letter, value in words:
+        if letter == axis:
+            return value * state.units_per_program_unit
+    return 0.0
 
 
 def _int_word(line: str, letter: str) -> int | None:

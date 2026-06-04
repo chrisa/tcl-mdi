@@ -17,11 +17,21 @@ from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.widget import Widget
 
 from tcl_lathe_hmi.backends import create_backend
+from tcl_lathe_hmi.cam import (
+    CamGenerationError,
+    HoleSpec,
+    LatheCamJob,
+    StockSpec,
+    TaperSpec,
+    TurningSpec,
+    generate_cam_program,
+)
 from tcl_lathe_hmi.config import JOG_INCREMENTS_MM, MachineConfig
 from tcl_lathe_hmi.gcode import (
     CanonicalAction,
     GCodeParseError,
     MoveAction,
+    PreviewSegment,
     PreviewPath,
     build_preview,
     parse_gcode,
@@ -124,6 +134,7 @@ class ManualPanel(BoxLayout):
         self.current_view = "manual"
         self.manual_work: BoxLayout | None = None
         self.program_panel: ProgramPanel | None = None
+        self.cam_panel: CamPanel | None = None
         self.tools_panel: ToolsPanel | None = None
         self.setup_panel: SetupPanel | None = None
         self.work_container: BoxLayout | None = None
@@ -152,6 +163,10 @@ class ManualPanel(BoxLayout):
         self.work_container = BoxLayout(orientation="vertical", size_hint_x=0.62)
         self.manual_work = self._build_manual_work()
         self.program_panel = ProgramPanel(service=self.service, config=self.config)
+        self.cam_panel = CamPanel(
+            service=self.service,
+            on_program_ready=self._load_cam_program,
+        )
         self.tools_panel = ToolsPanel(service=self.service)
         self.setup_panel = SetupPanel(service=self.service)
         self.work_container.add_widget(self.manual_work)
@@ -420,6 +435,10 @@ class ManualPanel(BoxLayout):
         bind_release(program, lambda *_: self._show_view("program"))
         nav.add_widget(program)
 
+        cam = action_button("CAM", BUTTON)
+        bind_release(cam, lambda *_: self._show_view("cam"))
+        nav.add_widget(cam)
+
         tools = action_button("Tools", BUTTON)
         bind_release(tools, lambda *_: self._show_view("tools"))
         nav.add_widget(tools)
@@ -465,6 +484,8 @@ class ManualPanel(BoxLayout):
 
         if self.program_panel is not None:
             self.program_panel.refresh(state)
+        if self.cam_panel is not None:
+            self.cam_panel.refresh(state)
         if self.tools_panel is not None:
             self.tools_panel.refresh(state)
         if self.setup_panel is not None:
@@ -475,6 +496,7 @@ class ManualPanel(BoxLayout):
             self.work_container is None
             or self.manual_work is None
             or self.program_panel is None
+            or self.cam_panel is None
             or self.tools_panel is None
             or self.setup_panel is None
         ):
@@ -483,6 +505,9 @@ class ManualPanel(BoxLayout):
         if view_name == "program":
             self.work_container.add_widget(self.program_panel)
             self.current_view = "program"
+        elif view_name == "cam":
+            self.work_container.add_widget(self.cam_panel)
+            self.current_view = "cam"
         elif view_name == "tools":
             self.work_container.add_widget(self.tools_panel)
             self.current_view = "tools"
@@ -493,6 +518,14 @@ class ManualPanel(BoxLayout):
             self.work_container.add_widget(self.manual_work)
             self.current_view = "manual"
         self.refresh(self.service.state)
+
+    def _load_cam_program(self, gcode: str, *, run: bool = False) -> None:
+        if self.program_panel is None:
+            return
+        self.program_panel.load_generated_program(gcode, label="CAM")
+        self._show_view("program")
+        if run:
+            self.program_panel.run_loaded_program(label="CAM")
 
     def _backend_selected(self, _spinner: Spinner, label: str) -> None:
         backend = "fred" if label == "FRED USB" else "sim"
@@ -746,6 +779,16 @@ class ProgramPanel(BoxLayout):
         if self.running:
             self._advance_execution(state)
 
+    def load_generated_program(self, text: str, *, label: str) -> None:
+        self.editor.text = text
+        self.path_input.text = f"{label.lower()}_generated.ngc"
+        self.program_status.text = f"{label}: loaded generated program"
+        self.program_status.color = TEXT
+        self._parse_and_preview()
+
+    def run_loaded_program(self, *, label: str) -> None:
+        self._start_actions_from_text(self.editor.text, label=label)
+
     def _parse_and_preview(self) -> bool:
         try:
             result = parse_gcode(
@@ -934,6 +977,294 @@ class ProgramPanel(BoxLayout):
                 if error is not None:
                     return error
         return None
+
+
+class CamPanel(BoxLayout):
+    def __init__(
+        self,
+        *,
+        service: MachineService,
+        on_program_ready: Callable[..., None],
+        **kwargs,
+    ):
+        super().__init__(orientation="horizontal", spacing=10, **kwargs)
+        self.service = service
+        self.on_program_ready = on_program_ready
+        self.generated_gcode = ""
+        self.face_enabled = True
+        self.rough_enabled = True
+        self.finish_enabled = True
+        self.taper_enabled = False
+        self.center_enabled = True
+        self.drill_enabled = True
+        self.bore_enabled = True
+
+        paint(self, PANEL)
+        self._build()
+
+    def _build(self) -> None:
+        form_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.48)
+        paint(form_side, PANEL_ALT)
+        form_side.add_widget(section_label("CAM"))
+
+        stock_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=116)
+        self.stock_diameter_input = field_input("20.0", title_text="Stock Diameter")
+        self.stock_length_input = field_input("60.0", title_text="Stock Length")
+        self.face_allowance_input = field_input("1.0", title_text="Face Allowance")
+        self.clearance_input = field_input("3.0", title_text="Clearance")
+        self._add_labeled(stock_grid, "Stock dia", self.stock_diameter_input)
+        self._add_labeled(stock_grid, "Stock len", self.stock_length_input)
+        self._add_labeled(stock_grid, "Face mm", self.face_allowance_input)
+        self._add_labeled(stock_grid, "Clearance", self.clearance_input)
+        form_side.add_widget(stock_grid)
+
+        turn_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=228)
+        self.target_diameter_input = field_input("16.0", title_text="Target Diameter")
+        self.target_length_input = field_input("60.0", title_text="Target Length")
+        self.stock_leave_input = field_input("0.5", title_text="Stock To Leave")
+        self.stepover_input = field_input("0.5", title_text="Turn Stepover")
+        self.rough_feed_input = field_input("80", title_text="Rough Feed")
+        self.finish_feed_input = field_input("40", title_text="Finish Feed")
+        self.turn_rpm_input = field_input("1200", title_text="Turning RPM")
+        self.turn_tool_input = field_input("1", integer=True, title_text="Turning Tool")
+        self._add_labeled(turn_grid, "Target dia", self.target_diameter_input)
+        self._add_labeled(turn_grid, "Turn len", self.target_length_input)
+        self._add_labeled(turn_grid, "Leave", self.stock_leave_input)
+        self._add_labeled(turn_grid, "Step", self.stepover_input)
+        self._add_labeled(turn_grid, "Rough F", self.rough_feed_input)
+        self._add_labeled(turn_grid, "Finish F", self.finish_feed_input)
+        self._add_labeled(turn_grid, "RPM", self.turn_rpm_input)
+        self._add_labeled(turn_grid, "Tool", self.turn_tool_input)
+        form_side.add_widget(turn_grid)
+
+        flag_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
+        for label, attr in (
+            ("Face", "face_enabled"),
+            ("Rough", "rough_enabled"),
+            ("Finish", "finish_enabled"),
+            ("Taper", "taper_enabled"),
+        ):
+            flag_row.add_widget(self._flag_button(label, attr))
+        form_side.add_widget(flag_row)
+
+        self.tool_string_input = text_field("DCMT070204R")
+        tool_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=48)
+        tool_row.add_widget(Label(text="Insert", color=MUTED, font_size=18, size_hint_x=None, width=86))
+        tool_row.add_widget(self.tool_string_input)
+        form_side.add_widget(tool_row)
+
+        taper_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=116)
+        self.taper_start_diameter_input = field_input("16.0", title_text="Taper Start Diameter")
+        self.taper_end_diameter_input = field_input("12.0", title_text="Taper End Diameter")
+        self.taper_start_z_input = field_input("0.0", title_text="Taper Start Z")
+        self.taper_end_z_input = field_input("-40.0", title_text="Taper End Z")
+        self._add_labeled(taper_grid, "Tap dia A", self.taper_start_diameter_input)
+        self._add_labeled(taper_grid, "Tap dia B", self.taper_end_diameter_input)
+        self._add_labeled(taper_grid, "Tap Z A", self.taper_start_z_input)
+        self._add_labeled(taper_grid, "Tap Z B", self.taper_end_z_input)
+        form_side.add_widget(taper_grid)
+
+        hole_flag_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
+        for label, attr in (
+            ("Center", "center_enabled"),
+            ("Drill", "drill_enabled"),
+            ("Bore", "bore_enabled"),
+        ):
+            hole_flag_row.add_widget(self._flag_button(label, attr))
+        form_side.add_widget(hole_flag_row)
+
+        hole_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=228)
+        self.center_depth_input = field_input("2.0", title_text="Center Drill Depth")
+        self.drill_diameter_input = field_input("6.0", title_text="Drill Diameter")
+        self.drill_depth_input = field_input("30.0", title_text="Drill Depth")
+        self.bore_diameter_input = field_input("10.0", title_text="Bore Diameter")
+        self.bore_depth_input = field_input("25.0", title_text="Bore Depth")
+        self.boring_step_input = field_input("0.5", title_text="Boring Stepover")
+        self.hole_rpm_input = field_input("1000", title_text="Hole RPM")
+        self.boring_tool_input = field_input("4", integer=True, title_text="Boring Tool")
+        self._add_labeled(hole_grid, "Center Z", self.center_depth_input)
+        self._add_labeled(hole_grid, "Drill dia", self.drill_diameter_input)
+        self._add_labeled(hole_grid, "Drill Z", self.drill_depth_input)
+        self._add_labeled(hole_grid, "Bore dia", self.bore_diameter_input)
+        self._add_labeled(hole_grid, "Bore Z", self.bore_depth_input)
+        self._add_labeled(hole_grid, "Bore step", self.boring_step_input)
+        self._add_labeled(hole_grid, "Hole RPM", self.hole_rpm_input)
+        self._add_labeled(hole_grid, "Bore tool", self.boring_tool_input)
+        form_side.add_widget(hole_grid)
+
+        action_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        generate = action_button("Generate", BLUE)
+        load = action_button("Load to MDI", GREEN)
+        run = action_button("Run", AMBER, width=100)
+        bind_release(generate, lambda *_: self._generate())
+        bind_release(load, lambda *_: self._load_to_mdi())
+        bind_release(run, lambda *_: self._run())
+        action_row.add_widget(generate)
+        action_row.add_widget(load)
+        action_row.add_widget(run)
+        form_side.add_widget(action_row)
+
+        self.cam_status = status_text("CAM ready")
+        form_side.add_widget(self.cam_status)
+        self.add_widget(form_side)
+
+        preview_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.52)
+        paint(preview_side, PANEL_ALT)
+        preview_side.add_widget(section_label("Preview / G-code"))
+        self.preview = PreviewCanvas()
+        preview_side.add_widget(self.preview)
+        self.gcode_editor = TextInput(
+            text="",
+            multiline=True,
+            font_size=16,
+            foreground_color=TEXT,
+            background_color=(0.05, 0.05, 0.05, 1),
+            cursor_color=TEXT,
+            size_hint_y=0.42,
+        )
+        preview_side.add_widget(self.gcode_editor)
+        self.add_widget(preview_side)
+
+    def refresh(self, _state: MachineState) -> None:
+        return
+
+    def _add_labeled(self, grid: GridLayout, label: str, widget) -> None:
+        grid.add_widget(Label(text=label, color=MUTED, font_size=17))
+        grid.add_widget(widget)
+
+    def _flag_button(self, label: str, attr: str) -> ToggleButton:
+        button = ToggleButton(
+            text=label,
+            allow_no_selection=True,
+            font_size=18,
+            bold=True,
+            color=TEXT,
+            background_normal="",
+            background_down="",
+            background_color=BUTTON,
+        )
+        button.state = "down" if getattr(self, attr) else "normal"
+        self._style_flag(button)
+        bind_release(button, lambda btn: self._set_flag(attr, btn))
+        button.bind(state=lambda btn, _state: self._style_flag(btn))
+        return button
+
+    def _set_flag(self, attr: str, button: ToggleButton) -> None:
+        setattr(self, attr, button.state == "down")
+
+    def _style_flag(self, button: ToggleButton) -> None:
+        button.background_color = GREEN if button.state == "down" else BUTTON
+
+    def _generate(self) -> bool:
+        try:
+            job = self._job_from_fields()
+            program = generate_cam_program(job)
+            result = parse_gcode(
+                program.gcode,
+                start_x_mm=self.service.state.work_x_mm,
+                start_z_mm=self.service.state.work_z_mm,
+            )
+        except (ValueError, CamGenerationError, GCodeParseError) as exc:
+            self.generated_gcode = ""
+            self.gcode_editor.text = ""
+            self.preview.set_preview(None, part_outline=None)
+            self._set_status(str(exc), RED)
+            return False
+
+        limit_error = self._preview_limit_error(result.actions)
+        if limit_error is not None:
+            self.generated_gcode = ""
+            self.gcode_editor.text = program.gcode
+            self.preview.set_preview(None, part_outline=program.part_outline)
+            self._set_status(limit_error, RED)
+            return False
+
+        preview_path = build_preview(
+            result.actions,
+            start_x_mm=self.service.state.work_x_mm,
+            start_z_mm=self.service.state.work_z_mm,
+        )
+        self.generated_gcode = program.gcode
+        self.gcode_editor.text = program.gcode
+        self.preview.set_preview(preview_path, part_outline=program.part_outline)
+        self._set_status(
+            f"Generated {len(result.actions)} action(s), {len(preview_path.segments)} move(s)",
+            TEXT,
+        )
+        return True
+
+    def _load_to_mdi(self) -> None:
+        if self.generated_gcode or self._generate():
+            self.on_program_ready(self.generated_gcode, run=False)
+
+    def _run(self) -> None:
+        if self.generated_gcode or self._generate():
+            self.on_program_ready(self.generated_gcode, run=True)
+
+    def _job_from_fields(self) -> LatheCamJob:
+        turning_tool = int(parse_number(self.turn_tool_input.text, 1))
+        boring_tool = int(parse_number(self.boring_tool_input.text, 4))
+        return LatheCamJob(
+            stock=StockSpec(
+                diameter_mm=parse_number(self.stock_diameter_input.text, 20.0),
+                length_mm=parse_number(self.stock_length_input.text, 60.0),
+                face_allowance_mm=parse_number(self.face_allowance_input.text, 1.0),
+                clearance_mm=parse_number(self.clearance_input.text, 3.0),
+            ),
+            turning=TurningSpec(
+                enabled=True,
+                face=self.face_enabled,
+                rough=self.rough_enabled,
+                finish=self.finish_enabled,
+                target_diameter_mm=parse_number(self.target_diameter_input.text, 16.0),
+                target_length_mm=parse_number(self.target_length_input.text, 60.0),
+                stock_to_leave_mm=parse_number(self.stock_leave_input.text, 0.5),
+                step_over_mm=parse_number(self.stepover_input.text, 0.5),
+                rough_feed=parse_number(self.rough_feed_input.text, 80.0),
+                finish_feed=parse_number(self.finish_feed_input.text, 40.0),
+                spindle_rpm=parse_number(self.turn_rpm_input.text, 1200.0),
+                tool_number=turning_tool,
+                station=turning_tool,
+                tool_string=self.tool_string_input.text.strip() or "DCMT070204R",
+            ),
+            taper=TaperSpec(
+                enabled=self.taper_enabled,
+                start_diameter_mm=parse_number(self.taper_start_diameter_input.text, 16.0),
+                end_diameter_mm=parse_number(self.taper_end_diameter_input.text, 12.0),
+                start_z_mm=parse_number(self.taper_start_z_input.text, 0.0),
+                end_z_mm=parse_number(self.taper_end_z_input.text, -40.0),
+            ),
+            hole=HoleSpec(
+                center_drill=self.center_enabled,
+                drill=self.drill_enabled,
+                bore=self.bore_enabled,
+                center_depth_mm=parse_number(self.center_depth_input.text, 2.0),
+                drill_diameter_mm=parse_number(self.drill_diameter_input.text, 6.0),
+                drill_depth_mm=parse_number(self.drill_depth_input.text, 30.0),
+                bore_diameter_mm=parse_number(self.bore_diameter_input.text, 10.0),
+                bore_depth_mm=parse_number(self.bore_depth_input.text, 25.0),
+                boring_step_over_mm=parse_number(self.boring_step_input.text, 0.5),
+                spindle_rpm=parse_number(self.hole_rpm_input.text, 1000.0),
+                boring_tool_number=boring_tool,
+                boring_station=boring_tool,
+            ),
+        )
+
+    def _preview_limit_error(self, actions: list[CanonicalAction]) -> str | None:
+        for action in actions:
+            if isinstance(action, MoveAction):
+                error = self.service.limits_error_for_work_target(
+                    action.target_x_mm,
+                    action.target_z_mm,
+                    f"CAM preview line {action.line_number}",
+                )
+                if error is not None:
+                    return error
+        return None
+
+    def _set_status(self, message: str, color) -> None:
+        self.cam_status.text = message
+        self.cam_status.color = color
 
 
 class ToolsPanel(BoxLayout):
@@ -1362,10 +1693,17 @@ class PreviewCanvas(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.preview_path: PreviewPath | None = None
+        self.part_outline: list[PreviewSegment] = []
         self.bind(pos=lambda *_: self._redraw(), size=lambda *_: self._redraw())
 
-    def set_preview(self, preview_path: PreviewPath | None) -> None:
+    def set_preview(
+        self,
+        preview_path: PreviewPath | None,
+        *,
+        part_outline: list[PreviewSegment] | None = None,
+    ) -> None:
         self.preview_path = preview_path
+        self.part_outline = part_outline or []
         self._redraw()
 
     def _redraw(self) -> None:
@@ -1376,12 +1714,17 @@ class PreviewCanvas(Widget):
             Color(0.24, 0.25, 0.27, 1)
             Line(rectangle=(self.x + 8, self.y + 8, max(0, self.width - 16), max(0, self.height - 16)), width=1)
 
-            if self.preview_path is None or not self.preview_path.segments:
+            if (self.preview_path is None or not self.preview_path.segments) and not self.part_outline:
                 return
 
-            bounds = self.preview_path
-            min_z, max_z = bounds.min_z_mm, bounds.max_z_mm
-            min_x, max_x = bounds.min_x_mm, bounds.max_x_mm
+            all_segments = []
+            if self.preview_path is not None:
+                all_segments.extend(self.preview_path.segments)
+            all_segments.extend(self.part_outline)
+            xs = [value for segment in all_segments for value in (segment.start_x_mm, segment.end_x_mm)]
+            zs = [value for segment in all_segments for value in (segment.start_z_mm, segment.end_z_mm)]
+            min_z, max_z = min(zs), max(zs)
+            min_x, max_x = min(xs), max(xs)
             if min_z == max_z:
                 min_z -= 1.0
                 max_z += 1.0
@@ -1405,6 +1748,15 @@ class PreviewCanvas(Widget):
                 Line(points=[zero_z_x, self.y + pad, zero_z_x, self.y + self.height - pad], width=1)
             if self.y + pad <= zero_x_y <= self.y + self.height - pad:
                 Line(points=[self.x + pad, zero_x_y, self.x + self.width - pad, zero_x_y], width=1)
+
+            for segment in self.part_outline:
+                Color(0.42, 0.55, 0.66, 1)
+                x0, y0 = map_point(segment.start_x_mm, segment.start_z_mm)
+                x1, y1 = map_point(segment.end_x_mm, segment.end_z_mm)
+                Line(points=[x0, y0, x1, y1], width=2.4)
+
+            if self.preview_path is None:
+                return
 
             for segment in self.preview_path.segments:
                 Color(*(AMBER if segment.mode == "rapid" else GREEN))

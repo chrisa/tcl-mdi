@@ -66,7 +66,17 @@ def test_parse_tool_change_keeps_tool_and_station_separate():
 
 def test_parse_rejects_unsupported_gcode_before_execution():
     with pytest.raises(GCodeParseError, match="unsupported G-code"):
-        parse_gcode("G2 X1 Z1 I0 K1")
+        parse_gcode("G4 X1 Z1 I0 K1")
+
+
+def test_parse_linearizes_xz_arc_moves():
+    result = parse_gcode("G21 G90 G18\nG0 X1 Z0\nG3 X0 Z1 I-1 K0 F100")
+
+    assert len(result.actions) > 2
+    assert isinstance(result.actions[-1], MoveAction)
+    assert result.actions[-1].mode == "feed"
+    assert result.actions[-1].target_x_mm == pytest.approx(0.0)
+    assert result.actions[-1].target_z_mm == pytest.approx(1.0)
 
 
 def test_preview_contains_move_segments_only():

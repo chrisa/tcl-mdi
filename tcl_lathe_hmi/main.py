@@ -57,7 +57,7 @@ def _configure_kivy(*, fullscreen: bool, show_cursor: bool) -> None:
     Config.set("graphics", "fullscreen", "auto" if fullscreen else "0")
     Config.set("graphics", "borderless", "1" if fullscreen else "0")
     Config.set("graphics", "show_cursor", "1" if show_cursor else "0")
-    # Many touchscreens also emit mouse compatibility events. This prevents
-    # duplicate mouse events after real touch activity while preserving normal
-    # mouse use on development machines.
-    Config.set("input", "mouse", "mouse,disable_on_activity")
+    # Many touchscreens also emit mouse compatibility events. In cursor-visible
+    # debug mode, keep normal mouse input so the pointer remains authoritative.
+    mouse_provider = "mouse" if show_cursor else "mouse,disable_on_activity"
+    Config.set("input", "mouse", mouse_provider)

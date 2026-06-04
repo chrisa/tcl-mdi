@@ -1,39 +1,41 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import wraps
+
 from kivy.clock import Clock
 from kivy.uix.button import Button
 from kivy.uix.togglebutton import ToggleButton
 
 
-class DebouncedButton(Button):
-    debounce_seconds = 0.18
+class DebouncedReleaseMixin:
+    debounce_seconds = 0.08
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._last_touch_down = -999.0
+    def bind(self, **kwargs):
+        callback = kwargs.get("on_release")
+        if callback is not None:
+            kwargs = dict(kwargs)
+            kwargs["on_release"] = self._debounced_release_callback(callback)
+        return super().bind(**kwargs)
 
-    def on_touch_down(self, touch):
-        if self.disabled or not self.collide_point(*touch.pos):
-            return super().on_touch_down(touch)
-        now = Clock.get_time()
-        if now - self._last_touch_down < self.debounce_seconds:
-            return True
-        self._last_touch_down = now
-        return super().on_touch_down(touch)
+    def _debounced_release_callback(self, callback: Callable):
+        last_release_at = -999.0
+
+        @wraps(callback)
+        def wrapped(*args, **kwargs):
+            nonlocal last_release_at
+            now = Clock.get_time()
+            if now - last_release_at < self.debounce_seconds:
+                return None
+            last_release_at = now
+            return callback(*args, **kwargs)
+
+        return wrapped
 
 
-class DebouncedToggleButton(ToggleButton):
-    debounce_seconds = 0.18
+class DebouncedButton(DebouncedReleaseMixin, Button):
+    pass
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._last_touch_down = -999.0
 
-    def on_touch_down(self, touch):
-        if self.disabled or not self.collide_point(*touch.pos):
-            return super().on_touch_down(touch)
-        now = Clock.get_time()
-        if now - self._last_touch_down < self.debounce_seconds:
-            return True
-        self._last_touch_down = now
-        return super().on_touch_down(touch)
+class DebouncedToggleButton(DebouncedReleaseMixin, ToggleButton):
+    pass

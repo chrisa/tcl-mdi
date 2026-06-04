@@ -21,6 +21,7 @@ from tcl_lathe_hmi.config import JOG_INCREMENTS_MM, MachineConfig
 from tcl_lathe_hmi.gcode import (
     CanonicalAction,
     GCodeParseError,
+    MoveAction,
     PreviewPath,
     build_preview,
     parse_gcode,
@@ -49,7 +50,11 @@ class TclLatheHmiApp(App):
         super().__init__(**kwargs)
         self.machine_config = MachineConfig()
         self.backend_name = backend_name
-        self.service = MachineService(create_backend(backend_name, self.machine_config))
+        self.service = MachineService(
+            create_backend(backend_name, self.machine_config),
+            config=self.machine_config,
+            settings_path=Path.home() / ".config" / "tcl-lathe-hmi" / "machine_state.json",
+        )
         self.panel: ManualPanel | None = None
         self._poll_event = None
 
@@ -106,11 +111,17 @@ class ManualPanel(BoxLayout):
         self.increment_mm = JOG_INCREMENTS_MM[1]
         self.jog_mode = "feed"
         self.command_widgets: list[Button | ToggleButton | TextInput | NumberEntryButton] = []
+        self.jog_increment_buttons: list[ToggleButton] = []
+        self.jog_mode_buttons: list[ToggleButton] = []
         self.current_view = "manual"
         self.manual_work: BoxLayout | None = None
         self.program_panel: ProgramPanel | None = None
         self.tools_panel: ToolsPanel | None = None
+        self.setup_panel: SetupPanel | None = None
         self.work_container: BoxLayout | None = None
+        self._status_flash_event = None
+        self._status_flash_phase = 0
+        self._status_flash_active = False
 
         paint(self, BG)
         self._build(initial_backend)
@@ -125,6 +136,7 @@ class ManualPanel(BoxLayout):
         self.manual_work = self._build_manual_work()
         self.program_panel = ProgramPanel(service=self.service, config=self.config)
         self.tools_panel = ToolsPanel(service=self.service)
+        self.setup_panel = SetupPanel(service=self.service)
         self.work_container.add_widget(self.manual_work)
         body.add_widget(self.work_container)
         self.add_widget(body)
@@ -260,6 +272,9 @@ class ManualPanel(BoxLayout):
             if index == 1:
                 btn.state = "down"
             btn.bind(on_release=lambda button, value=inc: self._set_increment(button, value))
+            btn.bind(state=lambda button, _state: self._style_toggle(button))
+            self._style_toggle(btn)
+            self.jog_increment_buttons.append(btn)
             self.command_widgets.append(btn)
             increments.add_widget(btn)
         box.add_widget(increments)
@@ -268,8 +283,13 @@ class ManualPanel(BoxLayout):
         feed = toggle_button("Feed", group="jog_mode")
         feed.state = "down"
         feed.bind(on_release=lambda button: self._set_jog_mode(button, "feed"))
+        feed.bind(state=lambda button, _state: self._style_toggle(button))
         rapid = toggle_button("Rapid", group="jog_mode")
         rapid.bind(on_release=lambda button: self._set_jog_mode(button, "rapid"))
+        rapid.bind(state=lambda button, _state: self._style_toggle(button))
+        self.jog_mode_buttons.extend([feed, rapid])
+        self._style_toggle(feed)
+        self._style_toggle(rapid)
         self.command_widgets.extend([feed, rapid])
         row.add_widget(feed)
         row.add_widget(rapid)
@@ -368,28 +388,27 @@ class ManualPanel(BoxLayout):
         nav.add_widget(tools)
 
         setup = action_button("Setup", BUTTON)
-        setup.disabled = True
+        setup.bind(on_release=lambda *_: self._show_view("setup"))
         nav.add_widget(setup)
         return nav
 
     def refresh(self, state: MachineState | None = None) -> None:
         state = state or self.service.state
         self.status_label.text = state.controller_label
-        self.status_label.color = status_color(state)
         self.message_label.text = state.status_message
         self.connect_button.text = "Clear Error" if state.error else ("Disconnect" if state.connected else "Connect")
         self.connect_button.background_color = RED if state.error else (AMBER if state.connected else BLUE)
 
-        self.x_value.text = f"{state.work_x_mm:+0.3f}"
-        self.z_value.text = f"{state.work_z_mm:+0.3f}"
+        self.x_value.text = f"{state.display_x_mm:+0.3f}"
+        self.z_value.text = f"{state.display_z_mm:+0.3f}"
         self.x_detail.text = (
-            f"machine {state.x_mm:+0.3f}\n"
-            f"offset {state.tool_x_offset_mm:+0.3f}\n"
+            f"{state.display_mode.upper()}  machine {state.x_mm:+0.3f}\n"
+            f"work {state.work_x_offset_mm:+0.3f}  tool {state.tool_x_offset_mm:+0.3f}\n"
             f"counts {state.x_counts if state.x_counts is not None else '--'}"
         )
         self.z_detail.text = (
-            f"machine {state.z_mm:+0.3f}\n"
-            f"offset {state.tool_z_offset_mm:+0.3f}\n"
+            f"{state.display_mode.upper()}  machine {state.z_mm:+0.3f}\n"
+            f"work {state.work_z_offset_mm:+0.3f}  tool {state.tool_z_offset_mm:+0.3f}\n"
             f"counts {state.z_counts if state.z_counts is not None else '--'}"
         )
 
@@ -404,13 +423,15 @@ class ManualPanel(BoxLayout):
         self.home_label.text = f"HOME {'X' if state.homed_x else '-'}{'Z' if state.homed_z else '-'}"
         self.home_label.color = GREEN if state.homed_x and state.homed_z else MUTED
 
-        for widget in self.command_widgets:
-            widget.disabled = not state.can_accept_commands
+        if not self._status_flash_active:
+            self.status_label.color = status_color(state)
 
         if self.program_panel is not None:
             self.program_panel.refresh(state)
         if self.tools_panel is not None:
             self.tools_panel.refresh(state)
+        if self.setup_panel is not None:
+            self.setup_panel.refresh(state)
 
     def _show_view(self, view_name: str) -> None:
         if (
@@ -418,6 +439,7 @@ class ManualPanel(BoxLayout):
             or self.manual_work is None
             or self.program_panel is None
             or self.tools_panel is None
+            or self.setup_panel is None
         ):
             return
         self.work_container.clear_widgets()
@@ -427,6 +449,9 @@ class ManualPanel(BoxLayout):
         elif view_name == "tools":
             self.work_container.add_widget(self.tools_panel)
             self.current_view = "tools"
+        elif view_name == "setup":
+            self.work_container.add_widget(self.setup_panel)
+            self.current_view = "setup"
         else:
             self.work_container.add_widget(self.manual_work)
             self.current_view = "manual"
@@ -454,6 +479,14 @@ class ManualPanel(BoxLayout):
         if button.state == "down":
             self.jog_mode = mode
 
+    def _style_toggle(self, button: ToggleButton) -> None:
+        if button.state == "down":
+            button.background_color = GREEN
+            button.color = TEXT
+        else:
+            button.background_color = BUTTON
+            button.color = TEXT
+
     def _jog(self, *, x_sign: float = 0.0, z_sign: float = 0.0) -> None:
         feed = int(parse_number(self.feed_input.text, self.config.jog_feed))
         ok = self.service.jog_delta(
@@ -464,19 +497,39 @@ class ManualPanel(BoxLayout):
             slew=self.config.jog_slew,
         )
         if not ok:
-            self._set_status(self.service.state.status_message)
+            self._set_status(self.service.state.status_message, flash=True)
         self.refresh(self.service.state)
 
     def _spindle(self, *, on: bool, forward: bool) -> None:
         rpm = parse_number(self.rpm_input.text, self.config.default_spindle_rpm)
         ok = self.service.set_spindle(on=on, rpm=rpm, forward=forward)
         if not ok:
-            self._set_status(self.service.state.status_message)
+            self._set_status(self.service.state.status_message, flash=True)
         self.refresh(self.service.state)
 
-    def _set_status(self, message: str) -> None:
+    def _set_status(self, message: str, *, flash: bool = False) -> None:
         self.service.state = replace(self.service.state, status_message=message)
+        if flash:
+            self._flash_status_indicator()
         self.refresh(self.service.state)
+
+    def _flash_status_indicator(self) -> None:
+        if self._status_flash_event is not None:
+            self._status_flash_event.cancel()
+        self._status_flash_phase = 0
+        self._status_flash_active = True
+        self._status_flash_event = Clock.schedule_interval(self._status_flash_tick, 0.12)
+        self._status_flash_tick(0)
+
+    def _status_flash_tick(self, _dt):
+        if self._status_flash_phase >= 6:
+            self._status_flash_active = False
+            self._status_flash_event = None
+            self.status_label.color = status_color(self.service.state)
+            return False
+        self.status_label.color = RED if self._status_flash_phase % 2 == 0 else status_color(self.service.state)
+        self._status_flash_phase += 1
+        return True
 
 
 class ProgramPanel(BoxLayout):
@@ -612,6 +665,12 @@ class ProgramPanel(BoxLayout):
             return False
 
         self.actions = result.actions
+        limit_error = self._preview_limit_error(self.actions)
+        if limit_error is not None:
+            self.preview.set_preview(None)
+            self.program_status.text = limit_error
+            self.program_status.color = RED
+            return False
         preview_path = build_preview(
             self.actions,
             start_x_mm=self.service.state.work_x_mm,
@@ -660,6 +719,13 @@ class ProgramPanel(BoxLayout):
         if not result.actions:
             self.program_status.text = f"{label}: no executable actions"
             self.program_status.color = AMBER
+            return
+        limit_error = self._preview_limit_error(result.actions)
+        if limit_error is not None:
+            self.actions = []
+            self.preview.set_preview(None)
+            self.program_status.text = limit_error
+            self.program_status.color = RED
             return
         self.actions = result.actions
         self.preview.set_preview(
@@ -760,6 +826,18 @@ class ProgramPanel(BoxLayout):
             return
         self.program_status.text = f"Saved {path}"
         self.program_status.color = TEXT
+
+    def _preview_limit_error(self, actions: list[CanonicalAction]) -> str | None:
+        for action in actions:
+            if isinstance(action, MoveAction):
+                error = self.service.limits_error_for_work_target(
+                    action.target_x_mm,
+                    action.target_z_mm,
+                    f"Preview line {action.line_number}",
+                )
+                if error is not None:
+                    return error
+        return None
 
 
 class ToolsPanel(BoxLayout):
@@ -964,6 +1042,224 @@ class ToolsPanel(BoxLayout):
     def _set_status(self, message: str, color) -> None:
         self.tool_status.text = message
         self.tool_status.color = color
+
+
+class SetupPanel(BoxLayout):
+    def __init__(self, *, service: MachineService, **kwargs):
+        super().__init__(orientation="vertical", spacing=10, **kwargs)
+        self.service = service
+        paint(self, PANEL)
+        self._build()
+        self._load_limit_fields_from_state()
+
+    def _build(self) -> None:
+        top = BoxLayout(orientation="horizontal", spacing=10, size_hint_y=0.36)
+        top.add_widget(self._build_coordinates_box())
+        top.add_widget(self._build_recovery_box())
+        self.add_widget(top)
+
+        bottom = BoxLayout(orientation="horizontal", spacing=10)
+        bottom.add_widget(self._build_limits_box())
+        bottom.add_widget(self._build_homing_box())
+        self.add_widget(bottom)
+
+    def _build_coordinates_box(self) -> BoxLayout:
+        box = BoxLayout(orientation="vertical", spacing=8)
+        paint(box, PANEL_ALT)
+        box.add_widget(section_label("Coordinates"))
+
+        mode_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        work = action_button("Work DRO", BLUE)
+        machine = action_button("Machine DRO", BUTTON)
+        work.bind(on_release=lambda *_: self._set_display_mode("work"))
+        machine.bind(on_release=lambda *_: self._set_display_mode("machine"))
+        mode_row.add_widget(work)
+        mode_row.add_widget(machine)
+        box.add_widget(mode_row)
+
+        self.coord_status = status_text("Work offsets X +0.000 Z +0.000")
+        box.add_widget(self.coord_status)
+
+        set_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        self.set_x_input = field_input("0.0", title_text="Set Current X")
+        self.set_z_input = field_input("0.0", title_text="Set Current Z")
+        set_x = action_button("Set X", BLUE, width=90)
+        set_z = action_button("Set Z", BLUE, width=90)
+        set_x.bind(on_release=lambda *_: self._set_current_axis("X"))
+        set_z.bind(on_release=lambda *_: self._set_current_axis("Z"))
+        set_row.add_widget(self.set_x_input)
+        set_row.add_widget(set_x)
+        set_row.add_widget(self.set_z_input)
+        set_row.add_widget(set_z)
+        box.add_widget(set_row)
+
+        zero_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        zero_x = action_button("Zero X", GREEN)
+        zero_z = action_button("Zero Z", GREEN)
+        clear = action_button("Clear Offsets", AMBER)
+        zero_x.bind(on_release=lambda *_: self._zero_axis("X"))
+        zero_z.bind(on_release=lambda *_: self._zero_axis("Z"))
+        clear.bind(on_release=lambda *_: self._clear_offsets())
+        zero_row.add_widget(zero_x)
+        zero_row.add_widget(zero_z)
+        zero_row.add_widget(clear)
+        box.add_widget(zero_row)
+        return box
+
+    def _build_recovery_box(self) -> BoxLayout:
+        box = BoxLayout(orientation="vertical", spacing=8)
+        paint(box, PANEL_ALT)
+        box.add_widget(section_label("Recovery"))
+        self.recovery_status = status_text("Controller recovery actions")
+        box.add_widget(self.recovery_status)
+
+        row1 = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        clear_error = action_button("Clear Error", AMBER)
+        reconnect = action_button("Reconnect", BLUE)
+        clear_error.bind(on_release=lambda *_: self._clear_error())
+        reconnect.bind(on_release=lambda *_: self._reconnect())
+        row1.add_widget(clear_error)
+        row1.add_widget(reconnect)
+        box.add_widget(row1)
+
+        row2 = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        connect = action_button("Connect", GREEN)
+        disconnect = action_button("Disconnect", RED)
+        connect.bind(on_release=lambda *_: self._connect())
+        disconnect.bind(on_release=lambda *_: self._disconnect())
+        row2.add_widget(connect)
+        row2.add_widget(disconnect)
+        box.add_widget(row2)
+        return box
+
+    def _build_limits_box(self) -> BoxLayout:
+        box = BoxLayout(orientation="vertical", spacing=8)
+        paint(box, PANEL_ALT)
+        box.add_widget(section_label("Soft Limits"))
+
+        grid = GridLayout(cols=2, spacing=8, size_hint_y=None, height=220)
+        self.x_min_input = field_input("-100.0", title_text="X Min Limit")
+        self.x_max_input = field_input("100.0", title_text="X Max Limit")
+        self.z_min_input = field_input("-100.0", title_text="Z Min Limit")
+        self.z_max_input = field_input("100.0", title_text="Z Max Limit")
+        for label, widget in (
+            ("X min", self.x_min_input),
+            ("X max", self.x_max_input),
+            ("Z min", self.z_min_input),
+            ("Z max", self.z_max_input),
+        ):
+            grid.add_widget(Label(text=label, color=MUTED, font_size=20))
+            grid.add_widget(widget)
+        box.add_widget(grid)
+
+        row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        self.limit_toggle = action_button("Limits On", GREEN)
+        apply_limits = action_button("Apply Limits", BLUE)
+        self.limit_toggle.bind(on_release=lambda *_: self._toggle_limits())
+        apply_limits.bind(on_release=lambda *_: self._apply_limits())
+        row.add_widget(self.limit_toggle)
+        row.add_widget(apply_limits)
+        box.add_widget(row)
+
+        self.limit_status = status_text("Soft limits enabled")
+        box.add_widget(self.limit_status)
+        return box
+
+    def _build_homing_box(self) -> BoxLayout:
+        box = BoxLayout(orientation="vertical", spacing=8)
+        paint(box, PANEL_ALT)
+        box.add_widget(section_label("Homing"))
+        self.homing_status = status_text("Homing unavailable: FRED/Python does not expose limit switch homing yet")
+        box.add_widget(self.homing_status)
+
+        row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
+        home_x = action_button("Home X", BUTTON)
+        home_z = action_button("Home Z", BUTTON)
+        home_all = action_button("Home All", BUTTON)
+        home_x.bind(on_release=lambda *_: self._home_axis("X"))
+        home_z.bind(on_release=lambda *_: self._home_axis("Z"))
+        home_all.bind(on_release=lambda *_: self._home_axis("X/Z"))
+        row.add_widget(home_x)
+        row.add_widget(home_z)
+        row.add_widget(home_all)
+        box.add_widget(row)
+        return box
+
+    def refresh(self, state: MachineState) -> None:
+        self.coord_status.text = (
+            f"Mode {state.display_mode.upper()}  "
+            f"work offset X {state.work_x_offset_mm:+0.3f} Z {state.work_z_offset_mm:+0.3f}"
+        )
+        self.limit_toggle.text = "Limits On" if state.soft_limits_enabled else "Limits Off"
+        self.limit_toggle.background_color = GREEN if state.soft_limits_enabled else AMBER
+        self.limit_status.text = (
+            f"X {state.x_min_limit_mm:+0.3f}..{state.x_max_limit_mm:+0.3f}  "
+            f"Z {state.z_min_limit_mm:+0.3f}..{state.z_max_limit_mm:+0.3f}"
+        )
+        self.homing_status.text = (
+            "Homing unavailable: FRED/Python does not expose limit switch homing yet"
+        )
+        self.recovery_status.text = state.status_message
+
+    def _load_limit_fields_from_state(self) -> None:
+        state = self.service.state
+        self.x_min_input.set_value(state.x_min_limit_mm)
+        self.x_max_input.set_value(state.x_max_limit_mm)
+        self.z_min_input.set_value(state.z_min_limit_mm)
+        self.z_max_input.set_value(state.z_max_limit_mm)
+
+    def _set_display_mode(self, mode: str) -> None:
+        self.service.set_display_mode(mode)
+        self.refresh(self.service.state)
+
+    def _set_current_axis(self, axis: str) -> None:
+        if axis == "X":
+            self.service.set_work_position(x_mm=parse_number(self.set_x_input.text, 0.0))
+        else:
+            self.service.set_work_position(z_mm=parse_number(self.set_z_input.text, 0.0))
+        self.refresh(self.service.state)
+
+    def _zero_axis(self, axis: str) -> None:
+        self.service.zero_work_axis(axis)
+        self.refresh(self.service.state)
+
+    def _clear_offsets(self) -> None:
+        self.service.clear_work_offsets()
+        self.refresh(self.service.state)
+
+    def _toggle_limits(self) -> None:
+        self.service.update_soft_limits(enabled=not self.service.state.soft_limits_enabled)
+        self.refresh(self.service.state)
+
+    def _apply_limits(self) -> None:
+        ok = self.service.update_soft_limits(
+            x_min=parse_number(self.x_min_input.text, self.service.state.x_min_limit_mm),
+            x_max=parse_number(self.x_max_input.text, self.service.state.x_max_limit_mm),
+            z_min=parse_number(self.z_min_input.text, self.service.state.z_min_limit_mm),
+            z_max=parse_number(self.z_max_input.text, self.service.state.z_max_limit_mm),
+        )
+        self.limit_status.color = TEXT if ok else RED
+        self.refresh(self.service.state)
+
+    def _home_axis(self, axis: str) -> None:
+        self.service.home_axis(axis)
+        self.refresh(self.service.state)
+
+    def _clear_error(self) -> None:
+        self.service.clear_error()
+        self.refresh(self.service.state)
+
+    def _connect(self) -> None:
+        self.service.connect()
+        self.refresh(self.service.state)
+
+    def _disconnect(self) -> None:
+        self.service.disconnect()
+        self.refresh(self.service.state)
+
+    def _reconnect(self) -> None:
+        self.service.reconnect()
+        self.refresh(self.service.state)
 
 
 class PreviewCanvas(Widget):

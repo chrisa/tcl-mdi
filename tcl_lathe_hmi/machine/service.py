@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
+from tcl_lathe_hmi.config import MachineConfig
 from tcl_lathe_hmi.gcode import (
     CanonicalAction,
     MessageAction,
@@ -18,13 +21,28 @@ from .state import MachineState
 class MachineService:
     """Backend-neutral command gate used by the UI."""
 
-    def __init__(self, backend: MachineBackend):
+    def __init__(
+        self,
+        backend: MachineBackend,
+        config: MachineConfig | None = None,
+        settings_path: str | Path | None = None,
+    ):
+        self.config = config or MachineConfig()
+        self.settings_path = Path(settings_path).expanduser() if settings_path is not None else None
         self.backend = backend
         self.tool_table = ToolTable([ToolRecord(tool_number=0, station=0)])
-        self.state = MachineState(status_message=f"{backend.name}: disconnected")
+        self.state = MachineState(
+            status_message=f"{backend.name}: disconnected",
+            soft_limits_enabled=self.config.soft_limits_enabled,
+            x_min_limit_mm=self.config.x_min_limit_mm,
+            x_max_limit_mm=self.config.x_max_limit_mm,
+            z_min_limit_mm=self.config.z_min_limit_mm,
+            z_max_limit_mm=self.config.z_max_limit_mm,
+        )
+        self.load_settings()
 
     def set_backend(self, backend: MachineBackend) -> MachineState:
-        tool_state = self._tool_state_kwargs(self.state)
+        preserved_state = self._preserved_state_kwargs(self.state)
         try:
             self.backend.disconnect()
         except BackendError:
@@ -32,7 +50,7 @@ class MachineService:
         self.backend = backend
         self.state = MachineState(
             status_message=f"{backend.name}: disconnected",
-            **tool_state,
+            **preserved_state,
         )
         return self.state
 
@@ -52,13 +70,13 @@ class MachineService:
         return self.state
 
     def disconnect(self) -> MachineState:
-        tool_state = self._tool_state_kwargs(self.state)
+        preserved_state = self._preserved_state_kwargs(self.state)
         try:
             self.backend.disconnect()
         finally:
             self.state = MachineState(
                 status_message=f"{self.backend.name}: disconnected",
-                **tool_state,
+                **preserved_state,
             )
         return self.state
 
@@ -101,6 +119,12 @@ class MachineService:
             self._mark_rejected("Machine is not ready for jog")
             return False
         try:
+            target_x = self.state.x_mm + x_mm
+            target_z = self.state.z_mm + z_mm
+            limit_error = self._limits_error_for_target(target_x, target_z, "Jog")
+            if limit_error is not None:
+                self._mark_rejected(limit_error)
+                return False
             self.backend.jog_delta(
                 x_mm=x_mm,
                 z_mm=z_mm,
@@ -164,6 +188,16 @@ class MachineService:
     ) -> bool:
         dx = action.target_x_mm - self.state.work_x_mm
         dz = action.target_z_mm - self.state.work_z_mm
+        target_machine_x = self.state.x_mm + dx
+        target_machine_z = self.state.z_mm + dz
+        limit_error = self._limits_error_for_target(
+            target_machine_x,
+            target_machine_z,
+            f"Line {action.line_number}",
+        )
+        if limit_error is not None:
+            self._mark_rejected(limit_error)
+            return False
         if dx == 0.0 and dz == 0.0:
             self.state = replace(
                 self.state,
@@ -240,27 +274,207 @@ class MachineService:
                 tool_z_offset_mm=active.z_offset_mm,
             )
 
+    def set_display_mode(self, mode: str) -> None:
+        if mode not in {"work", "machine"}:
+            raise ValueError(f"unsupported display mode: {mode}")
+        self.state = replace(self.state, display_mode=mode)
+        self.save_settings()
+
+    def set_work_position(
+        self,
+        *,
+        x_mm: float | None = None,
+        z_mm: float | None = None,
+    ) -> None:
+        kwargs: dict[str, float] = {}
+        if x_mm is not None:
+            kwargs["work_x_offset_mm"] = x_mm - self.state.x_mm - self.state.tool_x_offset_mm
+        if z_mm is not None:
+            kwargs["work_z_offset_mm"] = z_mm - self.state.z_mm - self.state.tool_z_offset_mm
+        if kwargs:
+            self.state = replace(self.state, **kwargs, status_message="Work offset updated")
+            self.save_settings()
+
+    def zero_work_axis(self, axis: str) -> bool:
+        normalized = axis.strip().upper()
+        if normalized == "X":
+            self.set_work_position(x_mm=0.0)
+            return True
+        if normalized == "Z":
+            self.set_work_position(z_mm=0.0)
+            return True
+        self._mark_rejected(f"Unsupported work offset axis: {axis}")
+        return False
+
+    def clear_work_offsets(self) -> None:
+        self.state = replace(
+            self.state,
+            work_x_offset_mm=0.0,
+            work_z_offset_mm=0.0,
+            status_message="Work offsets cleared",
+        )
+        self.save_settings()
+
+    def update_soft_limits(
+        self,
+        *,
+        enabled: bool | None = None,
+        x_min: float | None = None,
+        x_max: float | None = None,
+        z_min: float | None = None,
+        z_max: float | None = None,
+    ) -> bool:
+        next_enabled = self.state.soft_limits_enabled if enabled is None else enabled
+        next_x_min = self.state.x_min_limit_mm if x_min is None else x_min
+        next_x_max = self.state.x_max_limit_mm if x_max is None else x_max
+        next_z_min = self.state.z_min_limit_mm if z_min is None else z_min
+        next_z_max = self.state.z_max_limit_mm if z_max is None else z_max
+        if next_x_min > next_x_max:
+            self._mark_rejected("X soft-limit min cannot exceed max")
+            return False
+        if next_z_min > next_z_max:
+            self._mark_rejected("Z soft-limit min cannot exceed max")
+            return False
+        self.state = replace(
+            self.state,
+            soft_limits_enabled=next_enabled,
+            x_min_limit_mm=next_x_min,
+            x_max_limit_mm=next_x_max,
+            z_min_limit_mm=next_z_min,
+            z_max_limit_mm=next_z_max,
+            status_message="Soft limits updated",
+        )
+        self.save_settings()
+        return True
+
+    def home_axis(self, axis: str) -> bool:
+        self._mark_rejected(
+            f"Homing {axis.upper()} is unavailable: FRED/Python homing primitives are not implemented yet"
+        )
+        return False
+
+    def reconnect(self) -> MachineState:
+        self.disconnect()
+        return self.connect()
+
+    def load_settings(self) -> None:
+        if self.settings_path is None or not self.settings_path.exists():
+            return
+        try:
+            data = json.loads(self.settings_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        allowed = {
+            "display_mode",
+            "work_x_offset_mm",
+            "work_z_offset_mm",
+            "soft_limits_enabled",
+            "x_min_limit_mm",
+            "x_max_limit_mm",
+            "z_min_limit_mm",
+            "z_max_limit_mm",
+        }
+        kwargs = {key: data[key] for key in allowed if key in data}
+        if kwargs:
+            self.state = replace(self.state, **kwargs)
+
+    def save_settings(self) -> None:
+        if self.settings_path is None:
+            return
+        data = {
+            "display_mode": self.state.display_mode,
+            "work_x_offset_mm": self.state.work_x_offset_mm,
+            "work_z_offset_mm": self.state.work_z_offset_mm,
+            "soft_limits_enabled": self.state.soft_limits_enabled,
+            "x_min_limit_mm": self.state.x_min_limit_mm,
+            "x_max_limit_mm": self.state.x_max_limit_mm,
+            "z_min_limit_mm": self.state.z_min_limit_mm,
+            "z_max_limit_mm": self.state.z_max_limit_mm,
+        }
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self.settings_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        except OSError:
+            self.state = replace(
+                self.state,
+                status_message=f"Could not save settings to {self.settings_path}",
+            )
+
+    def limits_error_for_work_target(
+        self,
+        target_work_x_mm: float,
+        target_work_z_mm: float,
+        context: str,
+    ) -> str | None:
+        target_machine_x = (
+            target_work_x_mm
+            - self.state.work_x_offset_mm
+            - self.state.tool_x_offset_mm
+        )
+        target_machine_z = (
+            target_work_z_mm
+            - self.state.work_z_offset_mm
+            - self.state.tool_z_offset_mm
+        )
+        return self._limits_error_for_target(target_machine_x, target_machine_z, context)
+
     def _merge_tool_state(self, backend_state: MachineState) -> MachineState:
         return replace(
             backend_state,
             active_tool=self.state.active_tool,
             turret_station=self.state.turret_station,
+            work_x_offset_mm=self.state.work_x_offset_mm,
+            work_z_offset_mm=self.state.work_z_offset_mm,
             tool_x_offset_mm=self.state.tool_x_offset_mm,
             tool_z_offset_mm=self.state.tool_z_offset_mm,
             pending_tool=self.state.pending_tool,
             pending_turret_station=self.state.pending_turret_station,
+            display_mode=self.state.display_mode,
+            soft_limits_enabled=self.state.soft_limits_enabled,
+            x_min_limit_mm=self.state.x_min_limit_mm,
+            x_max_limit_mm=self.state.x_max_limit_mm,
+            z_min_limit_mm=self.state.z_min_limit_mm,
+            z_max_limit_mm=self.state.z_max_limit_mm,
         )
 
     @staticmethod
-    def _tool_state_kwargs(state: MachineState) -> dict[str, object]:
+    def _preserved_state_kwargs(state: MachineState) -> dict[str, object]:
         return {
             "active_tool": state.active_tool,
             "turret_station": state.turret_station,
+            "work_x_offset_mm": state.work_x_offset_mm,
+            "work_z_offset_mm": state.work_z_offset_mm,
             "tool_x_offset_mm": state.tool_x_offset_mm,
             "tool_z_offset_mm": state.tool_z_offset_mm,
             "pending_tool": state.pending_tool,
             "pending_turret_station": state.pending_turret_station,
+            "display_mode": state.display_mode,
+            "soft_limits_enabled": state.soft_limits_enabled,
+            "x_min_limit_mm": state.x_min_limit_mm,
+            "x_max_limit_mm": state.x_max_limit_mm,
+            "z_min_limit_mm": state.z_min_limit_mm,
+            "z_max_limit_mm": state.z_max_limit_mm,
         }
+
+    def _limits_error_for_target(
+        self,
+        target_x_mm: float,
+        target_z_mm: float,
+        context: str,
+    ) -> str | None:
+        if not self.state.soft_limits_enabled:
+            return None
+        if not (self.state.x_min_limit_mm <= target_x_mm <= self.state.x_max_limit_mm):
+            return (
+                f"{context}: X target {target_x_mm:+0.3f} outside soft limits "
+                f"{self.state.x_min_limit_mm:+0.3f}..{self.state.x_max_limit_mm:+0.3f}"
+            )
+        if not (self.state.z_min_limit_mm <= target_z_mm <= self.state.z_max_limit_mm):
+            return (
+                f"{context}: Z target {target_z_mm:+0.3f} outside soft limits "
+                f"{self.state.z_min_limit_mm:+0.3f}..{self.state.z_max_limit_mm:+0.3f}"
+            )
+        return None
 
     def _mark_rejected(self, message: str) -> None:
         self.state = replace(self.state, status_message=message)

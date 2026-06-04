@@ -21,6 +21,12 @@ class MachineConfig:
     default_spindle_rpm: float = 1200.0
     spindle_at_speed_tolerance_rpm: float = 100.0
 
+    x_min_limit_mm: float = -100.0
+    x_max_limit_mm: float = 100.0
+    z_min_limit_mm: float = -100.0
+    z_max_limit_mm: float = 100.0
+    soft_limits_enabled: bool = True
+
     ui_poll_interval_s: float = 0.1
     sim_motion_time_s: float = 0.18
     sim_spindle_command_time_s: float = 0.1

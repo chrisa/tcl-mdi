@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -27,9 +28,8 @@ def main(argv: list[str] | None = None) -> int:
         raw_args = raw_args[1:]
     args = parser.parse_args(raw_args)
 
-    # Kivy also parses sys.argv unless KIVY_NO_ARGS is set. Remove our
-    # application arguments before importing Kivy so --backend is not rejected
-    # by Kivy's parser.
+    # Set before the first Kivy import so Kivy leaves application arguments to us.
+    os.environ.setdefault("KIVY_NO_ARGS", "1")
     if argv is None:
         sys.argv = [sys.argv[0]]
 
@@ -59,5 +59,13 @@ def _configure_kivy(*, fullscreen: bool, show_cursor: bool) -> None:
     Config.set("graphics", "show_cursor", "1" if show_cursor else "0")
     # Many touchscreens also emit mouse compatibility events. In cursor-visible
     # debug mode, keep normal mouse input so the pointer remains authoritative.
-    mouse_provider = "mouse" if show_cursor else "mouse,disable_on_activity"
-    Config.set("input", "mouse", mouse_provider)
+    if show_cursor:
+        _configure_mouse_only_input(Config)
+    else:
+        Config.set("input", "mouse", "mouse,disable_on_activity")
+
+
+def _configure_mouse_only_input(config) -> None:
+    for key, _value in list(config.items("input")):
+        config.remove_option("input", key)
+    config.set("input", "mouse", "mouse")

@@ -8,10 +8,12 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.graphics import Color, Line, Rectangle
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
+from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.widget import Widget
 
 from tcl_lathe_hmi.backends import create_backend
@@ -27,7 +29,7 @@ from tcl_lathe_hmi.gcode import (
 from tcl_lathe_hmi.machine import MachineService, MachineState
 from tcl_lathe_hmi.tools import ToolRecord, ToolTable
 from tcl_lathe_hmi.ui.keypad import NumberEntryButton
-from tcl_lathe_hmi.ui.widgets import DebouncedButton, DebouncedToggleButton
+from tcl_lathe_hmi.ui.widgets import bind_release
 
 
 BG = (0.07, 0.08, 0.09, 1)
@@ -76,6 +78,8 @@ class TclLatheHmiApp(App):
     def on_stop(self):
         if self._poll_event is not None:
             self._poll_event.cancel()
+        if self.panel is not None:
+            self.panel.cancel_scheduled_events()
         self.service.disconnect()
 
     def switch_backend(self, backend_name: str) -> None:
@@ -114,9 +118,9 @@ class ManualPanel(BoxLayout):
         self.queued_jog_x_mm = 0.0
         self.queued_jog_z_mm = 0.0
         self.queued_jog_event = None
-        self.command_widgets: list[DebouncedButton | DebouncedToggleButton | TextInput | NumberEntryButton] = []
-        self.jog_increment_buttons: list[DebouncedToggleButton] = []
-        self.jog_mode_buttons: list[DebouncedToggleButton] = []
+        self.command_widgets: list[Button | ToggleButton | TextInput | NumberEntryButton] = []
+        self.jog_increment_buttons: list[ToggleButton] = []
+        self.jog_mode_buttons: list[ToggleButton] = []
         self.current_view = "manual"
         self.manual_work: BoxLayout | None = None
         self.program_panel: ProgramPanel | None = None
@@ -129,6 +133,15 @@ class ManualPanel(BoxLayout):
 
         paint(self, BG)
         self._build(initial_backend)
+
+    def cancel_scheduled_events(self) -> None:
+        if self.queued_jog_event is not None:
+            self.queued_jog_event.cancel()
+            self.queued_jog_event = None
+        if self._status_flash_event is not None:
+            self._status_flash_event.cancel()
+            self._status_flash_event = None
+        self._status_flash_active = False
 
     def _build(self, initial_backend: str) -> None:
         self.add_widget(self._build_status_bar(initial_backend))
@@ -186,7 +199,7 @@ class ManualPanel(BoxLayout):
         bar.add_widget(self.backend_spinner)
 
         self.connect_button = action_button("Connect", BLUE, width=150)
-        self.connect_button.bind(on_release=lambda *_: self._toggle_connection())
+        bind_release(self.connect_button, lambda *_: self._toggle_connection())
         bar.add_widget(self.connect_button)
 
         self.status_label = Label(
@@ -275,7 +288,7 @@ class ManualPanel(BoxLayout):
             btn = toggle_button(f"{inc:0.3f}", group="jog_increment")
             if index == 1:
                 btn.state = "down"
-            btn.bind(on_release=lambda button, value=inc: self._set_increment(button, value))
+            bind_release(btn, lambda button, value=inc: self._set_increment(button, value))
             btn.bind(state=lambda button, _state: self._style_toggle(button))
             self._style_toggle(btn)
             self.jog_increment_buttons.append(btn)
@@ -285,7 +298,7 @@ class ManualPanel(BoxLayout):
 
         custom_row = BoxLayout(orientation="horizontal", spacing=8)
         self.custom_increment_button = toggle_button("Custom", group="jog_increment")
-        self.custom_increment_button.bind(on_release=self._set_custom_increment)
+        bind_release(self.custom_increment_button, self._set_custom_increment)
         self.custom_increment_button.bind(state=lambda button, _state: self._style_toggle(button))
         self._style_toggle(self.custom_increment_button)
         self.jog_increment_buttons.append(self.custom_increment_button)
@@ -306,10 +319,10 @@ class ManualPanel(BoxLayout):
         row = BoxLayout(orientation="horizontal", spacing=8)
         feed = toggle_button("Feed", group="jog_mode")
         feed.state = "down"
-        feed.bind(on_release=lambda button: self._set_jog_mode(button, "feed"))
+        bind_release(feed, lambda button: self._set_jog_mode(button, "feed"))
         feed.bind(state=lambda button, _state: self._style_toggle(button))
         rapid = toggle_button("Rapid", group="jog_mode")
-        rapid.bind(on_release=lambda button: self._set_jog_mode(button, "rapid"))
+        bind_release(rapid, lambda button: self._set_jog_mode(button, "rapid"))
         rapid.bind(state=lambda button, _state: self._style_toggle(button))
         self.jog_mode_buttons.extend([feed, rapid])
         self._style_toggle(feed)
@@ -339,7 +352,7 @@ class ManualPanel(BoxLayout):
         stop = action_button("STOP", RED)
         x_plus = jog_button("X+")
         z_minus = jog_button("Z-")
-        buttons: list[DebouncedButton | None] = [
+        buttons: list[Button | None] = [
             None,
             z_plus,
             None,
@@ -359,11 +372,11 @@ class ManualPanel(BoxLayout):
             self.command_widgets.append(btn)
             grid.add_widget(btn)
 
-        z_plus.bind(on_release=lambda *_: self._jog(z_sign=1.0))
-        x_minus.bind(on_release=lambda *_: self._jog(x_sign=-1.0))
-        stop.bind(on_release=lambda *_: self._stop_jog())
-        x_plus.bind(on_release=lambda *_: self._jog(x_sign=1.0))
-        z_minus.bind(on_release=lambda *_: self._jog(z_sign=-1.0))
+        bind_release(z_plus, lambda *_: self._jog(z_sign=1.0))
+        bind_release(x_minus, lambda *_: self._jog(x_sign=-1.0))
+        bind_release(stop, lambda *_: self._stop_jog())
+        bind_release(x_plus, lambda *_: self._jog(x_sign=1.0))
+        bind_release(z_minus, lambda *_: self._jog(z_sign=-1.0))
         return grid
 
     def _build_spindle_controls(self) -> BoxLayout:
@@ -386,9 +399,9 @@ class ManualPanel(BoxLayout):
         forward = action_button("Forward", GREEN)
         reverse = action_button("Reverse", AMBER)
         stop = action_button("Stop", RED)
-        forward.bind(on_release=lambda *_: self._spindle(on=True, forward=True))
-        reverse.bind(on_release=lambda *_: self._spindle(on=True, forward=False))
-        stop.bind(on_release=lambda *_: self._spindle(on=False, forward=True))
+        bind_release(forward, lambda *_: self._spindle(on=True, forward=True))
+        bind_release(reverse, lambda *_: self._spindle(on=True, forward=False))
+        bind_release(stop, lambda *_: self._spindle(on=False, forward=True))
         self.command_widgets.extend([forward, reverse, stop])
         row.add_widget(forward)
         row.add_widget(reverse)
@@ -400,19 +413,19 @@ class ManualPanel(BoxLayout):
         nav = BoxLayout(orientation="horizontal", size_hint_y=None, height=64, spacing=8)
         paint(nav, PANEL)
         manual = action_button("Manual", BLUE)
-        manual.bind(on_release=lambda *_: self._show_view("manual"))
+        bind_release(manual, lambda *_: self._show_view("manual"))
         nav.add_widget(manual)
 
         program = action_button("MDI / Program", BUTTON)
-        program.bind(on_release=lambda *_: self._show_view("program"))
+        bind_release(program, lambda *_: self._show_view("program"))
         nav.add_widget(program)
 
         tools = action_button("Tools", BUTTON)
-        tools.bind(on_release=lambda *_: self._show_view("tools"))
+        bind_release(tools, lambda *_: self._show_view("tools"))
         nav.add_widget(tools)
 
         setup = action_button("Setup", BUTTON)
-        setup.bind(on_release=lambda *_: self._show_view("setup"))
+        bind_release(setup, lambda *_: self._show_view("setup"))
         nav.add_widget(setup)
         return nav
 
@@ -495,12 +508,12 @@ class ManualPanel(BoxLayout):
             self.service.connect()
         self.refresh(self.service.state)
 
-    def _set_increment(self, button: DebouncedToggleButton, value: float) -> None:
+    def _set_increment(self, button: ToggleButton, value: float) -> None:
         if button.state == "down":
             self.increment_mm = value
             self.use_custom_increment = False
 
-    def _set_custom_increment(self, button: DebouncedToggleButton) -> None:
+    def _set_custom_increment(self, button: ToggleButton) -> None:
         if button.state == "down":
             self.use_custom_increment = True
             self.custom_increment_mm = self._current_custom_increment()
@@ -522,11 +535,11 @@ class ManualPanel(BoxLayout):
         self.custom_increment_mm = self._current_custom_increment()
         return self.custom_increment_mm
 
-    def _set_jog_mode(self, button: DebouncedToggleButton, mode: str) -> None:
+    def _set_jog_mode(self, button: ToggleButton, mode: str) -> None:
         if button.state == "down":
             self.jog_mode = mode
 
-    def _style_toggle(self, button: DebouncedToggleButton) -> None:
+    def _style_toggle(self, button: ToggleButton) -> None:
         if button.state == "down":
             button.background_color = GREEN
             button.color = TEXT
@@ -646,7 +659,7 @@ class ProgramPanel(BoxLayout):
             padding=(8, 10, 8, 8),
         )
         run_mdi = action_button("Run MDI", GREEN, width=130)
-        run_mdi.bind(on_release=lambda *_: self._run_mdi())
+        bind_release(run_mdi, lambda *_: self._run_mdi())
         mdi_row.add_widget(self.mdi_input)
         mdi_row.add_widget(run_mdi)
         editor_side.add_widget(mdi_row)
@@ -690,8 +703,8 @@ class ProgramPanel(BoxLayout):
         )
         load = action_button("Load", BUTTON, width=90)
         save = action_button("Save", BUTTON, width=90)
-        load.bind(on_release=lambda *_: self._load_program())
-        save.bind(on_release=lambda *_: self._save_program())
+        bind_release(load, lambda *_: self._load_program())
+        bind_release(save, lambda *_: self._save_program())
         file_row.add_widget(self.path_input)
         file_row.add_widget(load)
         file_row.add_widget(save)
@@ -705,9 +718,9 @@ class ProgramPanel(BoxLayout):
         parse_btn = action_button("Parse / Preview", BLUE)
         run_btn = action_button("Run Program", GREEN)
         stop_btn = action_button("Stop", RED, width=100)
-        parse_btn.bind(on_release=lambda *_: self._parse_and_preview())
-        run_btn.bind(on_release=lambda *_: self._run_program())
-        stop_btn.bind(on_release=lambda *_: self._stop_program("Program stopped"))
+        bind_release(parse_btn, lambda *_: self._parse_and_preview())
+        bind_release(run_btn, lambda *_: self._run_program())
+        bind_release(stop_btn, lambda *_: self._stop_program("Program stopped"))
         top_row.add_widget(parse_btn)
         top_row.add_widget(run_btn)
         top_row.add_widget(stop_btn)
@@ -959,9 +972,9 @@ class ToolsPanel(BoxLayout):
         load = action_button("Load", BUTTON, width=90)
         save = action_button("Save", BUTTON, width=90)
         import_btn = action_button("Import Text", BLUE, width=140)
-        load.bind(on_release=lambda *_: self._load_table())
-        save.bind(on_release=lambda *_: self._save_table())
-        import_btn.bind(on_release=lambda *_: self._import_from_editor())
+        bind_release(load, lambda *_: self._load_table())
+        bind_release(save, lambda *_: self._save_table())
+        bind_release(import_btn, lambda *_: self._import_from_editor())
         path_row.add_widget(self.tool_path_input)
         path_row.add_widget(load)
         path_row.add_widget(save)
@@ -1000,8 +1013,8 @@ class ToolsPanel(BoxLayout):
         row1 = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
         upsert = action_button("Upsert Tool", BLUE)
         set_active = action_button("Set Active", GREEN)
-        upsert.bind(on_release=lambda *_: self._upsert_tool())
-        set_active.bind(on_release=lambda *_: self._set_active_tool())
+        bind_release(upsert, lambda *_: self._upsert_tool())
+        bind_release(set_active, lambda *_: self._set_active_tool())
         row1.add_widget(upsert)
         row1.add_widget(set_active)
         edit_side.add_widget(row1)
@@ -1010,7 +1023,7 @@ class ToolsPanel(BoxLayout):
         confirm = action_button("Confirm Pending", GREEN)
         auto = action_button("Auto Turret N/A", BUTTON)
         auto.disabled = True
-        confirm.bind(on_release=lambda *_: self._confirm_pending_tool())
+        bind_release(confirm, lambda *_: self._confirm_pending_tool())
         row2.add_widget(confirm)
         row2.add_widget(auto)
         edit_side.add_widget(row2)
@@ -1154,8 +1167,8 @@ class SetupPanel(BoxLayout):
         mode_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
         work = action_button("Work DRO", BLUE)
         machine = action_button("Machine DRO", BUTTON)
-        work.bind(on_release=lambda *_: self._set_display_mode("work"))
-        machine.bind(on_release=lambda *_: self._set_display_mode("machine"))
+        bind_release(work, lambda *_: self._set_display_mode("work"))
+        bind_release(machine, lambda *_: self._set_display_mode("machine"))
         mode_row.add_widget(work)
         mode_row.add_widget(machine)
         box.add_widget(mode_row)
@@ -1168,8 +1181,8 @@ class SetupPanel(BoxLayout):
         self.set_z_input = field_input("0.0", title_text="Set Current Z")
         set_x = action_button("Set X", BLUE, width=90)
         set_z = action_button("Set Z", BLUE, width=90)
-        set_x.bind(on_release=lambda *_: self._set_current_axis("X"))
-        set_z.bind(on_release=lambda *_: self._set_current_axis("Z"))
+        bind_release(set_x, lambda *_: self._set_current_axis("X"))
+        bind_release(set_z, lambda *_: self._set_current_axis("Z"))
         set_row.add_widget(self.set_x_input)
         set_row.add_widget(set_x)
         set_row.add_widget(self.set_z_input)
@@ -1180,9 +1193,9 @@ class SetupPanel(BoxLayout):
         zero_x = action_button("Zero X", GREEN)
         zero_z = action_button("Zero Z", GREEN)
         clear = action_button("Clear Offsets", AMBER)
-        zero_x.bind(on_release=lambda *_: self._zero_axis("X"))
-        zero_z.bind(on_release=lambda *_: self._zero_axis("Z"))
-        clear.bind(on_release=lambda *_: self._clear_offsets())
+        bind_release(zero_x, lambda *_: self._zero_axis("X"))
+        bind_release(zero_z, lambda *_: self._zero_axis("Z"))
+        bind_release(clear, lambda *_: self._clear_offsets())
         zero_row.add_widget(zero_x)
         zero_row.add_widget(zero_z)
         zero_row.add_widget(clear)
@@ -1199,8 +1212,8 @@ class SetupPanel(BoxLayout):
         row1 = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
         clear_error = action_button("Clear Error", AMBER)
         reconnect = action_button("Reconnect", BLUE)
-        clear_error.bind(on_release=lambda *_: self._clear_error())
-        reconnect.bind(on_release=lambda *_: self._reconnect())
+        bind_release(clear_error, lambda *_: self._clear_error())
+        bind_release(reconnect, lambda *_: self._reconnect())
         row1.add_widget(clear_error)
         row1.add_widget(reconnect)
         box.add_widget(row1)
@@ -1208,8 +1221,8 @@ class SetupPanel(BoxLayout):
         row2 = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
         connect = action_button("Connect", GREEN)
         disconnect = action_button("Disconnect", RED)
-        connect.bind(on_release=lambda *_: self._connect())
-        disconnect.bind(on_release=lambda *_: self._disconnect())
+        bind_release(connect, lambda *_: self._connect())
+        bind_release(disconnect, lambda *_: self._disconnect())
         row2.add_widget(connect)
         row2.add_widget(disconnect)
         box.add_widget(row2)
@@ -1238,8 +1251,8 @@ class SetupPanel(BoxLayout):
         row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
         self.limit_toggle = action_button("Limits On", GREEN)
         apply_limits = action_button("Apply Limits", BLUE)
-        self.limit_toggle.bind(on_release=lambda *_: self._toggle_limits())
-        apply_limits.bind(on_release=lambda *_: self._apply_limits())
+        bind_release(self.limit_toggle, lambda *_: self._toggle_limits())
+        bind_release(apply_limits, lambda *_: self._apply_limits())
         row.add_widget(self.limit_toggle)
         row.add_widget(apply_limits)
         box.add_widget(row)
@@ -1259,9 +1272,9 @@ class SetupPanel(BoxLayout):
         home_x = action_button("Home X", BUTTON)
         home_z = action_button("Home Z", BUTTON)
         home_all = action_button("Home All", BUTTON)
-        home_x.bind(on_release=lambda *_: self._home_axis("X"))
-        home_z.bind(on_release=lambda *_: self._home_axis("Z"))
-        home_all.bind(on_release=lambda *_: self._home_axis("X/Z"))
+        bind_release(home_x, lambda *_: self._home_axis("X"))
+        bind_release(home_z, lambda *_: self._home_axis("Z"))
+        bind_release(home_all, lambda *_: self._home_axis("X/Z"))
         row.add_widget(home_x)
         row.add_widget(home_z)
         row.add_widget(home_all)
@@ -1412,11 +1425,11 @@ def paint(widget, color) -> None:
     widget.bind(pos=update_rect, size=update_rect)
 
 
-def action_button(text: str, color, *, width: int | None = None) -> DebouncedButton:
+def action_button(text: str, color, *, width: int | None = None) -> Button:
     kwargs = {}
     if width is not None:
         kwargs = {"size_hint_x": None, "width": width}
-    return DebouncedButton(
+    return Button(
         text=text,
         font_size=22,
         bold=True,
@@ -1427,12 +1440,12 @@ def action_button(text: str, color, *, width: int | None = None) -> DebouncedBut
     )
 
 
-def jog_button(text: str) -> DebouncedButton:
+def jog_button(text: str) -> Button:
     return action_button(text, BLUE)
 
 
-def toggle_button(text: str, *, group: str) -> DebouncedToggleButton:
-    return DebouncedToggleButton(
+def toggle_button(text: str, *, group: str) -> ToggleButton:
+    return ToggleButton(
         text=text,
         group=group,
         allow_no_selection=False,

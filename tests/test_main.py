@@ -40,3 +40,31 @@ def test_main_accepts_separator_before_backend(monkeypatch):
     assert main_module.main(["--", "--backend", "sim"]) == 0
 
     assert FakeApp.calls == ["sim"]
+
+
+def test_mouse_visible_mode_removes_raw_touch_input_providers():
+    class FakeConfig:
+        def __init__(self):
+            self.values = {
+                "mouse": "mouse,disable_on_activity",
+                "%(name)s": "probesysfs",
+                "device_touchpad": "mtdev,/dev/input/event13",
+            }
+
+        def items(self, section):
+            assert section == "input"
+            return list(self.values.items())
+
+        def remove_option(self, section, key):
+            assert section == "input"
+            self.values.pop(key)
+
+        def set(self, section, key, value):
+            assert section == "input"
+            self.values[key] = value
+
+    config = FakeConfig()
+
+    main_module._configure_mouse_only_input(config)
+
+    assert config.values == {"mouse": "mouse"}

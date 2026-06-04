@@ -5,10 +5,11 @@ from collections.abc import Callable
 from kivy.core.window import Window
 from kivy.properties import BooleanProperty, NumericProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 
-from tcl_lathe_hmi.ui.widgets import DebouncedButton
+from tcl_lathe_hmi.ui.widgets import bind_release
 
 
 TEXT = (0.93, 0.94, 0.92, 1)
@@ -20,7 +21,7 @@ RED = (0.64, 0.18, 0.18, 1)
 AMBER = (0.78, 0.52, 0.14, 1)
 
 
-class NumberEntryButton(DebouncedButton):
+class NumberEntryButton(Button):
     """Touch-friendly numeric input that opens a modal keypad."""
 
     value = NumericProperty(0.0)
@@ -47,7 +48,7 @@ class NumberEntryButton(DebouncedButton):
         self.halign = "right"
         self.text = str(text)
         self.value = _coerce_value(self.text, self.integer, 0)
-        self.bind(on_release=lambda *_: self.open_keypad())
+        bind_release(self, lambda *_: self.open_keypad())
 
     def set_value(self, value: float | int) -> None:
         self.value = int(value) if self.integer else float(value)
@@ -134,11 +135,11 @@ class NumberEntryPopup(Popup):
         *,
         color=BUTTON,
         width: int | None = None,
-    ) -> DebouncedButton:
+    ) -> Button:
         kwargs = {}
         if width is not None:
             kwargs = {"size_hint_x": None, "width": width}
-        button = DebouncedButton(
+        button = Button(
             text=text,
             font_size=28,
             bold=True,
@@ -147,7 +148,7 @@ class NumberEntryPopup(Popup):
             background_color=color,
             **kwargs,
         )
-        button.bind(on_release=lambda btn: handler(btn))
+        bind_release(button, lambda btn: handler(btn))
         return button
 
     def _on_keyboard_down(self, _window, keycode, _scancode, text, _modifiers):
@@ -171,7 +172,7 @@ class NumberEntryPopup(Popup):
         self.value_label.text = self.old_text
         self._replace_on_next_digit = True
 
-    def add_text(self, button: DebouncedButton) -> None:
+    def add_text(self, button: Button) -> None:
         self._append_token(button.text)
 
     def dot_key(self, *_args) -> None:

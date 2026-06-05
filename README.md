@@ -22,16 +22,21 @@ MDI/program execution with pending tool confirmation and current line highlight:
 ## Features
 
 - Touch-friendly X/Z DRO using work or machine coordinates.
-- Jog controls, configurable increments, feed/rapid jog modes, and spindle
-  controls.
+- Jog controls, configurable increments, feed/rapid jog modes, spindle
+  controls, and direct toolchanger controls.
 - Simulator backend for development without hardware.
 - FRED USB backend for real controller communication.
 - MDI/program editor with G-code syntax highlighting, parse/preview, current
   tool marker, currently executing line highlight, and manual pending-tool
   confirmation.
-- Tool table setup and offset management.
+- Tool table setup, offset management, and persisted turret-station tracking.
 - CAM screen with stock, face/rough/finish/taper, drill/bore inputs, 3D part
   sense-check rendering, generated G-code, and direct handoff to MDI.
+
+The default tool table is a sample with 12 logical tools. Tools T1-T8 are
+assigned to physical turret stations P1-P8 and can run through the automatic
+FRED toolchanger path. Tools T9-T12 are manual/non-turret sample tools and
+will leave a pending confirmation when requested by a program.
 
 ## Setup
 

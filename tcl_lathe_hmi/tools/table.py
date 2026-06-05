@@ -28,7 +28,6 @@ class ToolRecord:
     def to_linuxcnc_line(self) -> str:
         parts = [
             f"T{self.tool_number}",
-            f"P{self.station if self.station is not None else self.tool_number}",
             f"X{self.x_offset_mm:.6g}",
             "Y0.0",
             f"Z{self.z_offset_mm:.6g}",
@@ -40,6 +39,8 @@ class ToolRecord:
             "W0.0",
             f"D{self.diameter_mm:.6g}",
         ]
+        if self.station is not None:
+            parts.insert(1, f"P{self.station}")
         if self.front_angle_deg is not None:
             parts.append(f"I{self.front_angle_deg:.6g}")
         if self.back_angle_deg is not None:
@@ -153,3 +154,22 @@ def _split_comment(line: str) -> tuple[str, str]:
         return line, ""
     content, comment = line.split(";", 1)
     return content, comment
+
+
+def sample_tool_table() -> ToolTable:
+    return ToolTable(
+        [
+            ToolRecord(tool_number=1, station=1, comment="turning rough/finish"),
+            ToolRecord(tool_number=2, station=2, diameter_mm=3.0, comment="centre drill"),
+            ToolRecord(tool_number=3, station=3, diameter_mm=6.0, comment="6mm drill"),
+            ToolRecord(tool_number=4, station=4, diameter_mm=10.0, comment="boring bar"),
+            ToolRecord(tool_number=5, station=5, comment="parting tool"),
+            ToolRecord(tool_number=6, station=6, comment="external thread"),
+            ToolRecord(tool_number=7, station=7, comment="internal thread"),
+            ToolRecord(tool_number=8, station=8, comment="spare turret station"),
+            ToolRecord(tool_number=9, diameter_mm=8.0, comment="manual 8mm drill"),
+            ToolRecord(tool_number=10, diameter_mm=10.0, comment="manual 10mm drill"),
+            ToolRecord(tool_number=11, comment="manual tap"),
+            ToolRecord(tool_number=12, comment="manual special tool"),
+        ]
+    )

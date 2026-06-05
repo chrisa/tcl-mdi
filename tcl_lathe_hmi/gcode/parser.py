@@ -198,7 +198,7 @@ def _handle_m(
     if code == 6:
         return ToolChangeAction(
             line_number=line_number,
-            tool_number=state.tool_number,
+            tool_number=_int_word(raw_line, "I") or state.tool_number,
             turret_station=_int_word(raw_line, "K"),
             source=raw_line,
         )

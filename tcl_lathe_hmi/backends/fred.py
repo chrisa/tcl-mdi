@@ -170,6 +170,37 @@ class FredBackend:
             status_message="fred: spindle command queued",
         )
 
+    def select_tool(
+        self,
+        *,
+        current_station: int,
+        target_station: int,
+        slew: int = 61,
+    ) -> bool:
+        client = self._require_ready()
+        _validate_station(current_station, "current station")
+        _validate_station(target_station, "target station")
+        try:
+            command_active = client.change_tool(
+                current_station=current_station,
+                target_station=target_station,
+                slew=slew,
+                wait=False,
+            )
+        except Exception as exc:
+            raise BackendError(f"fred: toolchanger command failed: {exc}") from exc
+
+        self._state = replace(
+            self._state,
+            busy=bool(command_active),
+            status_message=(
+                f"fred: toolchanger P{current_station}->P{target_station} queued"
+                if command_active
+                else f"fred: toolchanger already at P{target_station}"
+            ),
+        )
+        return bool(command_active)
+
     def wait_idle(self, timeout_ms: int | None = None) -> None:
         client = self._require_client()
         try:
@@ -261,3 +292,8 @@ def _optional_int(value: object) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _validate_station(station: int, label: str) -> None:
+    if not 1 <= station <= 8:
+        raise CommandRejectedError(f"{label} must be in range 1..8")

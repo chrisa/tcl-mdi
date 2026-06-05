@@ -142,7 +142,7 @@ def test_generate_cam_program_parses_when_liblathe_is_available():
     except CamGenerationError as exc:
         pytest.skip(str(exc))
 
-    assert "T1 M6 K1" in program.gcode
+    assert "M06 I1 K1" in program.gcode
     assert "M5" in program.gcode
     assert program.part_outline
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tcl_lathe_hmi.tools import ToolRecord, ToolTable
+from tcl_lathe_hmi.tools import ToolRecord, ToolTable, sample_tool_table
 
 
 def test_import_linuxcnc_tool_table_keeps_tool_and_station_separate():
@@ -41,3 +41,21 @@ def test_export_linuxcnc_tool_table_is_reimportable():
     imported = ToolTable.from_linuxcnc(exported)
 
     assert imported.get(2) == table.get(2)
+
+
+def test_export_preserves_tools_without_turret_station():
+    table = ToolTable([ToolRecord(tool_number=9, station=None, comment="manual drill")])
+
+    exported = table.export_linuxcnc()
+    imported = ToolTable.from_linuxcnc(exported)
+
+    assert "P9" not in exported
+    assert imported.get(9) == table.get(9)
+
+
+def test_sample_tool_table_has_twelve_tools_and_eight_turret_stations():
+    table = sample_tool_table()
+
+    assert [tool.tool_number for tool in table.tools] == list(range(1, 13))
+    assert [table.get(tool_number).station for tool_number in range(1, 9)] == list(range(1, 9))
+    assert [table.get(tool_number).station for tool_number in range(9, 13)] == [None] * 4

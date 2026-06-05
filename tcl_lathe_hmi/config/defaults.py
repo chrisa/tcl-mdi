@@ -30,5 +30,6 @@ class MachineConfig:
 
     ui_poll_interval_s: float = 0.1
     sim_motion_time_s: float = 0.18
+    sim_tool_change_time_s: float = 0.35
     sim_spindle_command_time_s: float = 0.1
     sim_spindle_ramp_rpm_per_s: float = 3500.0

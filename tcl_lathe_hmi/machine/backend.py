@@ -49,5 +49,14 @@ class MachineBackend(Protocol):
     ) -> None:
         ...
 
+    def select_tool(
+        self,
+        *,
+        current_station: int,
+        target_station: int,
+        slew: int = 61,
+    ) -> bool:
+        ...
+
     def wait_idle(self, timeout_ms: int | None = None) -> None:
         ...

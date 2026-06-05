@@ -60,6 +60,13 @@ class FakeFredClient:
         self.idle = False
         return True
 
+    def change_tool(self, **kwargs):
+        self.commands.append(("tool", kwargs))
+        if kwargs["current_station"] == kwargs["target_station"]:
+            return False
+        self.idle = False
+        return True
+
     def wait_idle(self, timeout_ms=None):
         self.idle = True
 
@@ -101,4 +108,28 @@ def test_fred_backend_queues_jog_and_spindle_commands():
     assert client.commands[-1] == (
         "spindle",
         {"on": True, "rpm": 1000.0, "forward": False, "wait": False},
+    )
+
+
+def test_fred_backend_queues_toolchanger_command():
+    FakeFredClient.instances = []
+    backend = FredBackend(MachineConfig(), client_factory=FakeFredClient)
+    backend.connect()
+    client = FakeFredClient.instances[-1]
+
+    assert backend.select_tool(current_station=1, target_station=3, slew=61)
+
+    assert client.commands[-1] == (
+        "tool",
+        {"current_station": 1, "target_station": 3, "slew": 61, "wait": False},
+    )
+    assert backend.poll().busy
+
+    client.idle = True
+    backend.poll()
+
+    assert not backend.select_tool(current_station=3, target_station=3, slew=61)
+    assert client.commands[-1] == (
+        "tool",
+        {"current_station": 3, "target_station": 3, "slew": 61, "wait": False},
     )

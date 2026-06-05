@@ -56,6 +56,15 @@ def test_parse_incremental_and_inches():
 
 
 def test_parse_tool_change_keeps_tool_and_station_separate():
+    result = parse_gcode("M06 I4 K2")
+    action = result.actions[0]
+
+    assert isinstance(action, ToolChangeAction)
+    assert action.tool_number == 4
+    assert action.turret_station == 2
+
+
+def test_parse_legacy_t_word_tool_change():
     result = parse_gcode("T4 M6 K2")
     action = result.actions[0]
 

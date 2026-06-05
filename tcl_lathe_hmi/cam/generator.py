@@ -326,7 +326,7 @@ def build_part_outline(job: LatheCamJob) -> list[PreviewSegment]:
 
 
 def _tool_change_line(tool_number: int, station: int | None) -> str:
-    line = f"T{tool_number} M6"
+    line = f"M06 I{tool_number}"
     if station is not None:
         line += f" K{station}"
     return line

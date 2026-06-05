@@ -47,3 +47,18 @@ def test_sim_backend_spindle_ramps_toward_target():
 
     assert not state.spindle.commanded_on
     assert state.spindle.target_rpm == 0
+
+
+def test_sim_backend_toolchanger_busy_for_station_change():
+    config = MachineConfig(sim_tool_change_time_s=0.01)
+    backend = SimBackend(config)
+    backend.connect()
+
+    assert backend.select_tool(current_station=1, target_station=4, slew=61)
+    assert backend.poll().busy
+
+    backend.wait_idle(timeout_ms=500)
+    assert not backend.poll().busy
+
+    assert not backend.select_tool(current_station=4, target_station=4, slew=61)
+    assert not backend.poll().busy

@@ -89,6 +89,28 @@ class SimBackend:
             status_message="sim: spindle command queued",
         )
 
+    def select_tool(
+        self,
+        *,
+        current_station: int,
+        target_station: int,
+        slew: int = 61,
+    ) -> bool:
+        self._require_ready()
+        _validate_station(current_station, "current station")
+        _validate_station(target_station, "target station")
+        if current_station == target_station:
+            self._state = replace(self._state, status_message="sim: tool already selected")
+            return False
+
+        self._busy_until = time.monotonic() + self.config.sim_tool_change_time_s
+        self._state = replace(
+            self._state,
+            busy=True,
+            status_message=f"sim: toolchanger P{current_station}->P{target_station} queued",
+        )
+        return True
+
     def wait_idle(self, timeout_ms: int | None = None) -> None:
         deadline = None
         if timeout_ms is not None:
@@ -156,3 +178,8 @@ class SimBackend:
                 at_speed=at_speed,
             ),
         )
+
+
+def _validate_station(station: int, label: str) -> None:
+    if not 1 <= station <= 8:
+        raise CommandRejectedError(f"{label} must be in range 1..8")

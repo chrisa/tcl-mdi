@@ -26,8 +26,9 @@ MDI/program execution with pending tool confirmation and current line highlight:
   controls.
 - Simulator backend for development without hardware.
 - FRED USB backend for real controller communication.
-- MDI/program editor with parse/preview, current tool marker, currently
-  executing line highlight, and manual pending-tool confirmation.
+- MDI/program editor with G-code syntax highlighting, parse/preview, current
+  tool marker, currently executing line highlight, and manual pending-tool
+  confirmation.
 - Tool table setup and offset management.
 - CAM screen with stock, face/rough/finish/taper, drill/bore inputs, 3D part
   sense-check rendering, generated G-code, and direct handoff to MDI.

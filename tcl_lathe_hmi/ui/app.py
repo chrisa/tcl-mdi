@@ -10,6 +10,7 @@ from kivy.clock import Clock
 from kivy.graphics import Color, Line, Mesh, Rectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.codeinput import CodeInput
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.spinner import Spinner
@@ -35,9 +36,11 @@ from tcl_lathe_hmi.config import JOG_INCREMENTS_MM, MachineConfig
 from tcl_lathe_hmi.gcode import (
     CanonicalAction,
     GCodeParseError,
+    LinuxCncGCodeLexer,
     MoveAction,
     PreviewSegment,
     PreviewPath,
+    TclGCodeStyle,
     build_preview,
     parse_gcode,
 )
@@ -707,13 +710,10 @@ class ProgramPanel(BoxLayout):
         editor_side.add_widget(section_label("MDI / Program"))
 
         mdi_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=54)
-        self.mdi_input = TextInput(
+        self.mdi_input = gcode_input(
             text="G91 G1 X0.1 F100",
             multiline=False,
             font_size=22,
-            foreground_color=TEXT,
-            background_color=(0.06, 0.06, 0.06, 1),
-            cursor_color=TEXT,
             padding=(8, 10, 8, 8),
         )
         run_mdi = action_button("Run MDI", GREEN, width=130)
@@ -733,7 +733,7 @@ class ProgramPanel(BoxLayout):
         self.history_label.bind(size=lambda widget, *_: setattr(widget, "text_size", widget.size))
         editor_side.add_widget(self.history_label)
 
-        self.editor = TextInput(
+        self.editor = gcode_input(
             text=(
                 "G21 G90 G18\n"
                 "S1200 M3\n"
@@ -743,9 +743,6 @@ class ProgramPanel(BoxLayout):
             ),
             multiline=True,
             font_size=18,
-            foreground_color=TEXT,
-            background_color=(0.05, 0.05, 0.05, 1),
-            cursor_color=TEXT,
         )
         editor_side.add_widget(self.editor)
 
@@ -1148,13 +1145,10 @@ class CamPanel(BoxLayout):
         self.preview = PreviewCanvas(size_hint_x=0.52)
         preview_row.add_widget(self.preview)
         preview_side.add_widget(preview_row)
-        self.gcode_editor = TextInput(
+        self.gcode_editor = gcode_input(
             text="",
             multiline=True,
             font_size=16,
-            foreground_color=TEXT,
-            background_color=(0.05, 0.05, 0.05, 1),
-            cursor_color=TEXT,
             size_hint_y=0.42,
         )
         preview_side.add_widget(self.gcode_editor)
@@ -2377,6 +2371,31 @@ def text_field(text: str) -> TextInput:
         background_color=(0.06, 0.06, 0.06, 1),
         cursor_color=TEXT,
         padding=(8, 8, 8, 8),
+    )
+
+
+def gcode_input(
+    *,
+    text: str,
+    multiline: bool,
+    font_size: int,
+    padding: tuple[int, int, int, int] | None = None,
+    **kwargs,
+) -> CodeInput:
+    if padding is None:
+        padding = (8, 8, 8, 8)
+    return CodeInput(
+        text=text,
+        lexer=LinuxCncGCodeLexer(),
+        style=TclGCodeStyle,
+        multiline=multiline,
+        do_wrap=False,
+        font_size=font_size,
+        foreground_color=TEXT,
+        background_color=(0.05, 0.05, 0.05, 1),
+        cursor_color=TEXT,
+        padding=padding,
+        **kwargs,
     )
 
 

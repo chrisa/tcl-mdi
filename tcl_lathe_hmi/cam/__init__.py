@@ -1,4 +1,9 @@
-from .generator import CamGenerationError, GeneratedCamProgram, generate_cam_program
+from .generator import (
+    CamGenerationError,
+    GeneratedCamProgram,
+    build_part_outline,
+    generate_cam_program,
+)
 from .models import (
     HoleSpec,
     LatheCamJob,
@@ -7,9 +12,11 @@ from .models import (
     TurningSpec,
     CamValidationError,
 )
+from .solid import CamSolidError, build_part_mesh
 
 __all__ = [
     "CamGenerationError",
+    "CamSolidError",
     "CamValidationError",
     "GeneratedCamProgram",
     "HoleSpec",
@@ -17,5 +24,7 @@ __all__ = [
     "StockSpec",
     "TaperSpec",
     "TurningSpec",
+    "build_part_mesh",
+    "build_part_outline",
     "generate_cam_program",
 ]

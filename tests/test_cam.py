@@ -10,6 +10,8 @@ from tcl_lathe_hmi.cam import (
     StockSpec,
     TaperSpec,
     TurningSpec,
+    build_part_outline,
+    build_part_mesh,
     generate_cam_program,
 )
 from tcl_lathe_hmi.cam.generator import _liblathe_commands_to_gcode
@@ -78,6 +80,47 @@ def test_taper_profile_points_are_inside_turned_length():
         (12.0, -60.0),
         (0.0, -60.0),
     ]
+
+
+def test_part_outline_includes_bore_boundary():
+    outline = build_part_outline(
+        LatheCamJob(
+            hole=HoleSpec(
+                drill_diameter_mm=6.0,
+                bore_diameter_mm=10.0,
+                bore_depth_mm=25.0,
+            )
+        )
+    )
+
+    hole_segments = [segment for segment in outline if segment.mode == "hole"]
+
+    assert len(hole_segments) == 2
+    assert hole_segments[0].start_x_mm == 10.0
+    assert hole_segments[0].end_z_mm == -25.0
+
+
+def test_build_part_mesh_uses_stock_length_and_bore_radius():
+    mesh = build_part_mesh(
+        LatheCamJob(
+            stock=StockSpec(diameter_mm=20.0, length_mm=70.0),
+            turning=TurningSpec(target_diameter_mm=16.0, target_length_mm=50.0),
+            hole=HoleSpec(
+                drill_diameter_mm=6.0,
+                drill_depth_mm=40.0,
+                bore_diameter_mm=10.0,
+                bore_depth_mm=25.0,
+            ),
+        ),
+        sections=24,
+    )
+
+    assert len(mesh.vertices) > 0
+    assert len(mesh.faces) > 0
+    assert mesh.bounds[0][0] == pytest.approx(-70.0)
+    assert mesh.bounds[1][0] == pytest.approx(0.0)
+    assert mesh.bounds[0][1] == pytest.approx(-10.0)
+    assert mesh.bounds[1][1] == pytest.approx(10.0)
 
 
 def test_liblathe_command_conversion_doubles_radius_x_and_linearizes_arcs():

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 from pathlib import Path
 from typing import Callable
 
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.graphics import Color, Line, Rectangle
+from kivy.graphics import Color, Line, Mesh, Rectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
@@ -19,11 +20,15 @@ from kivy.uix.widget import Widget
 from tcl_lathe_hmi.backends import create_backend
 from tcl_lathe_hmi.cam import (
     CamGenerationError,
+    CamSolidError,
+    CamValidationError,
     HoleSpec,
     LatheCamJob,
     StockSpec,
     TaperSpec,
     TurningSpec,
+    build_part_mesh,
+    build_part_outline,
     generate_cam_program,
 )
 from tcl_lathe_hmi.config import JOG_INCREMENTS_MM, MachineConfig
@@ -137,6 +142,8 @@ class ManualPanel(BoxLayout):
         self.cam_panel: CamPanel | None = None
         self.tools_panel: ToolsPanel | None = None
         self.setup_panel: SetupPanel | None = None
+        self.body: BoxLayout | None = None
+        self.machine_panel: BoxLayout | None = None
         self.work_container: BoxLayout | None = None
         self._status_flash_event = None
         self._status_flash_phase = 0
@@ -157,8 +164,9 @@ class ManualPanel(BoxLayout):
     def _build(self, initial_backend: str) -> None:
         self.add_widget(self._build_status_bar(initial_backend))
 
-        body = BoxLayout(orientation="horizontal", spacing=10)
-        body.add_widget(self._build_persistent_machine_panel())
+        self.body = BoxLayout(orientation="horizontal", spacing=10)
+        self.machine_panel = self._build_persistent_machine_panel()
+        self.body.add_widget(self.machine_panel)
 
         self.work_container = BoxLayout(orientation="vertical", size_hint_x=0.62)
         self.manual_work = self._build_manual_work()
@@ -170,8 +178,8 @@ class ManualPanel(BoxLayout):
         self.tools_panel = ToolsPanel(service=self.service)
         self.setup_panel = SetupPanel(service=self.service)
         self.work_container.add_widget(self.manual_work)
-        body.add_widget(self.work_container)
-        self.add_widget(body)
+        self.body.add_widget(self.work_container)
+        self.add_widget(self.body)
 
         self.add_widget(self._build_nav_bar())
 
@@ -499,6 +507,8 @@ class ManualPanel(BoxLayout):
             or self.cam_panel is None
             or self.tools_panel is None
             or self.setup_panel is None
+            or self.body is None
+            or self.machine_panel is None
         ):
             return
         self.work_container.clear_widgets()
@@ -517,7 +527,21 @@ class ManualPanel(BoxLayout):
         else:
             self.work_container.add_widget(self.manual_work)
             self.current_view = "manual"
+        self._set_machine_panel_visible(self.current_view in {"manual", "program", "tools"})
         self.refresh(self.service.state)
+
+    def _set_machine_panel_visible(self, visible: bool) -> None:
+        if self.body is None or self.machine_panel is None or self.work_container is None:
+            return
+        self.body.clear_widgets()
+        if visible:
+            self.machine_panel.size_hint_x = 0.38
+            self.work_container.size_hint_x = 0.62
+            self.body.add_widget(self.machine_panel)
+            self.body.add_widget(self.work_container)
+        else:
+            self.work_container.size_hint_x = 1.0
+            self.body.add_widget(self.work_container)
 
     def _load_cam_program(self, gcode: str, *, run: bool = False) -> None:
         if self.program_panel is None:
@@ -671,6 +695,7 @@ class ProgramPanel(BoxLayout):
         self.execution_index = 0
         self.waiting_for_idle = False
         self.waiting_for_tool = False
+        self.highlight_editor_lines = False
         self.history: list[str] = []
 
         paint(self, PANEL)
@@ -750,12 +775,15 @@ class ProgramPanel(BoxLayout):
         top_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=54)
         parse_btn = action_button("Parse / Preview", BLUE)
         run_btn = action_button("Run Program", GREEN)
+        self.confirm_tool_button = action_button("Confirm Tool", AMBER, width=160)
         stop_btn = action_button("Stop", RED, width=100)
         bind_release(parse_btn, lambda *_: self._parse_and_preview())
         bind_release(run_btn, lambda *_: self._run_program())
+        bind_release(self.confirm_tool_button, lambda *_: self._confirm_pending_tool())
         bind_release(stop_btn, lambda *_: self._stop_program("Program stopped"))
         top_row.add_widget(parse_btn)
         top_row.add_widget(run_btn)
+        top_row.add_widget(self.confirm_tool_button)
         top_row.add_widget(stop_btn)
         preview_side.add_widget(top_row)
 
@@ -776,6 +804,8 @@ class ProgramPanel(BoxLayout):
         self.add_widget(preview_side)
 
     def refresh(self, state: MachineState) -> None:
+        self._refresh_tool_confirm_button(state)
+        self.preview.set_tool_position(x_mm=state.work_x_mm, z_mm=state.work_z_mm)
         if self.running:
             self._advance_execution(state)
 
@@ -784,12 +814,75 @@ class ProgramPanel(BoxLayout):
         self.path_input.text = f"{label.lower()}_generated.ngc"
         self.program_status.text = f"{label}: loaded generated program"
         self.program_status.color = TEXT
+        self._clear_line_highlight()
         self._parse_and_preview()
 
     def run_loaded_program(self, *, label: str) -> None:
-        self._start_actions_from_text(self.editor.text, label=label)
+        self._start_actions_from_text(self.editor.text, label=label, highlight_editor=True)
+
+    def _refresh_tool_confirm_button(self, state: MachineState) -> None:
+        if not hasattr(self, "confirm_tool_button"):
+            return
+        if state.pending_tool is None:
+            self.confirm_tool_button.text = "Confirm Tool"
+            self.confirm_tool_button.disabled = True
+            self.confirm_tool_button.background_color = BUTTON
+            return
+        station = (
+            ""
+            if state.pending_turret_station is None
+            else f" P{state.pending_turret_station}"
+        )
+        self.confirm_tool_button.text = f"Confirm T{state.pending_tool}{station}"
+        self.confirm_tool_button.disabled = False
+        self.confirm_tool_button.background_color = AMBER
+
+    def _confirm_pending_tool(self) -> None:
+        state = self.service.state
+        if state.pending_tool is None:
+            self.program_status.text = "No pending tool change"
+            self.program_status.color = AMBER
+            return
+        if self.service.confirm_tool_change(state.pending_tool, state.pending_turret_station):
+            self.program_status.text = self.service.state.status_message
+            self.program_status.color = GREEN
+        else:
+            self.program_status.text = self.service.state.status_message
+            self.program_status.color = RED
+        self._refresh_tool_confirm_button(self.service.state)
+
+    def _highlight_action_line(self, action: CanonicalAction) -> None:
+        if not self.highlight_editor_lines:
+            return
+        line_number = getattr(action, "line_number", 0)
+        if line_number <= 0:
+            return
+        self._highlight_editor_line(line_number)
+
+    def _highlight_editor_line(self, line_number: int) -> None:
+        lines = self.editor.text.splitlines(keepends=True)
+        if not lines or line_number > len(lines):
+            self._clear_line_highlight()
+            return
+        start = sum(len(line) for line in lines[: line_number - 1])
+        line_text = lines[line_number - 1]
+        end = start + len(line_text.rstrip("\r\n"))
+        if end <= start:
+            end = min(len(self.editor.text), start + len(line_text))
+        try:
+            self.editor.select_text(start, end)
+            self.editor.cursor = (0, max(0, line_number - 1))
+        except Exception:
+            return
+
+    def _clear_line_highlight(self) -> None:
+        try:
+            self.editor.cancel_selection()
+        except Exception:
+            return
 
     def _parse_and_preview(self) -> bool:
+        self._clear_line_highlight()
         try:
             result = parse_gcode(
                 self.editor.text,
@@ -833,16 +926,23 @@ class ProgramPanel(BoxLayout):
         self.history.insert(0, line)
         self.history = self.history[:4]
         self.history_label.text = "MDI history: " + " | ".join(self.history)
-        self._start_actions_from_text(line, label="MDI")
+        self._start_actions_from_text(line, label="MDI", highlight_editor=False)
 
     def _run_program(self) -> None:
-        self._start_actions_from_text(self.editor.text, label="Program")
+        self._start_actions_from_text(self.editor.text, label="Program", highlight_editor=True)
 
-    def _start_actions_from_text(self, text: str, *, label: str) -> None:
+    def _start_actions_from_text(
+        self,
+        text: str,
+        *,
+        label: str,
+        highlight_editor: bool,
+    ) -> None:
         if self.running:
             self.program_status.text = "Program is already running"
             self.program_status.color = AMBER
             return
+        self._clear_line_highlight()
         try:
             result = parse_gcode(
                 text,
@@ -878,6 +978,7 @@ class ProgramPanel(BoxLayout):
         self.execution_index = 0
         self.waiting_for_idle = False
         self.waiting_for_tool = False
+        self.highlight_editor_lines = highlight_editor
         self.program_status.text = f"{label}: running {len(self.actions)} action(s)"
         self.program_status.color = GREEN
         self._advance_execution(self.service.state)
@@ -909,6 +1010,7 @@ class ProgramPanel(BoxLayout):
 
         while self.running and self.execution_index < len(self.actions):
             action = self.actions[self.execution_index]
+            self._highlight_action_line(action)
             ok = self.service.execute_action(
                 action,
                 default_feed=self.config.jog_feed,
@@ -923,6 +1025,7 @@ class ProgramPanel(BoxLayout):
                     self.waiting_for_tool = True
                     self.program_status.text = self.service.state.status_message
                     self.program_status.color = AMBER
+                    self._refresh_tool_confirm_button(self.service.state)
                     return
                 self._stop_program(self.service.state.status_message)
                 return
@@ -933,6 +1036,8 @@ class ProgramPanel(BoxLayout):
 
         if self.running and self.execution_index >= len(self.actions):
             self.running = False
+            self.highlight_editor_lines = False
+            self._clear_line_highlight()
             self.program_status.text = "Program complete"
             self.program_status.color = GREEN
 
@@ -940,6 +1045,8 @@ class ProgramPanel(BoxLayout):
         self.running = False
         self.waiting_for_idle = False
         self.waiting_for_tool = False
+        self.highlight_editor_lines = False
+        self._clear_line_highlight()
         self.program_status.text = message
         self.program_status.color = AMBER if "stopped" in message.lower() else RED
 
@@ -1007,90 +1114,14 @@ class CamPanel(BoxLayout):
         paint(form_side, PANEL_ALT)
         form_side.add_widget(section_label("CAM"))
 
-        stock_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=116)
-        self.stock_diameter_input = field_input("20.0", title_text="Stock Diameter")
-        self.stock_length_input = field_input("60.0", title_text="Stock Length")
-        self.face_allowance_input = field_input("1.0", title_text="Face Allowance")
-        self.clearance_input = field_input("3.0", title_text="Clearance")
-        self._add_labeled(stock_grid, "Stock dia", self.stock_diameter_input)
-        self._add_labeled(stock_grid, "Stock len", self.stock_length_input)
-        self._add_labeled(stock_grid, "Face mm", self.face_allowance_input)
-        self._add_labeled(stock_grid, "Clearance", self.clearance_input)
-        form_side.add_widget(stock_grid)
-
-        turn_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=228)
-        self.target_diameter_input = field_input("16.0", title_text="Target Diameter")
-        self.target_length_input = field_input("60.0", title_text="Target Length")
-        self.stock_leave_input = field_input("0.5", title_text="Stock To Leave")
-        self.stepover_input = field_input("0.5", title_text="Turn Stepover")
-        self.rough_feed_input = field_input("80", title_text="Rough Feed")
-        self.finish_feed_input = field_input("40", title_text="Finish Feed")
-        self.turn_rpm_input = field_input("1200", title_text="Turning RPM")
-        self.turn_tool_input = field_input("1", integer=True, title_text="Turning Tool")
-        self._add_labeled(turn_grid, "Target dia", self.target_diameter_input)
-        self._add_labeled(turn_grid, "Turn len", self.target_length_input)
-        self._add_labeled(turn_grid, "Leave", self.stock_leave_input)
-        self._add_labeled(turn_grid, "Step", self.stepover_input)
-        self._add_labeled(turn_grid, "Rough F", self.rough_feed_input)
-        self._add_labeled(turn_grid, "Finish F", self.finish_feed_input)
-        self._add_labeled(turn_grid, "RPM", self.turn_rpm_input)
-        self._add_labeled(turn_grid, "Tool", self.turn_tool_input)
-        form_side.add_widget(turn_grid)
-
-        flag_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
-        for label, attr in (
-            ("Face", "face_enabled"),
-            ("Rough", "rough_enabled"),
-            ("Finish", "finish_enabled"),
-            ("Taper", "taper_enabled"),
-        ):
-            flag_row.add_widget(self._flag_button(label, attr))
-        form_side.add_widget(flag_row)
-
-        self.tool_string_input = text_field("DCMT070204R")
-        tool_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=48)
-        tool_row.add_widget(Label(text="Insert", color=MUTED, font_size=18, size_hint_x=None, width=86))
-        tool_row.add_widget(self.tool_string_input)
-        form_side.add_widget(tool_row)
-
-        taper_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=116)
-        self.taper_start_diameter_input = field_input("16.0", title_text="Taper Start Diameter")
-        self.taper_end_diameter_input = field_input("12.0", title_text="Taper End Diameter")
-        self.taper_start_z_input = field_input("0.0", title_text="Taper Start Z")
-        self.taper_end_z_input = field_input("-40.0", title_text="Taper End Z")
-        self._add_labeled(taper_grid, "Tap dia A", self.taper_start_diameter_input)
-        self._add_labeled(taper_grid, "Tap dia B", self.taper_end_diameter_input)
-        self._add_labeled(taper_grid, "Tap Z A", self.taper_start_z_input)
-        self._add_labeled(taper_grid, "Tap Z B", self.taper_end_z_input)
-        form_side.add_widget(taper_grid)
-
-        hole_flag_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
-        for label, attr in (
-            ("Center", "center_enabled"),
-            ("Drill", "drill_enabled"),
-            ("Bore", "bore_enabled"),
-        ):
-            hole_flag_row.add_widget(self._flag_button(label, attr))
-        form_side.add_widget(hole_flag_row)
-
-        hole_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=228)
-        self.center_depth_input = field_input("2.0", title_text="Center Drill Depth")
-        self.drill_diameter_input = field_input("6.0", title_text="Drill Diameter")
-        self.drill_depth_input = field_input("30.0", title_text="Drill Depth")
-        self.bore_diameter_input = field_input("10.0", title_text="Bore Diameter")
-        self.bore_depth_input = field_input("25.0", title_text="Bore Depth")
-        self.boring_step_input = field_input("0.5", title_text="Boring Stepover")
-        self.hole_rpm_input = field_input("1000", title_text="Hole RPM")
-        self.boring_tool_input = field_input("4", integer=True, title_text="Boring Tool")
-        self._add_labeled(hole_grid, "Center Z", self.center_depth_input)
-        self._add_labeled(hole_grid, "Drill dia", self.drill_diameter_input)
-        self._add_labeled(hole_grid, "Drill Z", self.drill_depth_input)
-        self._add_labeled(hole_grid, "Bore dia", self.bore_diameter_input)
-        self._add_labeled(hole_grid, "Bore Z", self.bore_depth_input)
-        self._add_labeled(hole_grid, "Bore step", self.boring_step_input)
-        self._add_labeled(hole_grid, "Hole RPM", self.hole_rpm_input)
-        self._add_labeled(hole_grid, "Bore tool", self.boring_tool_input)
-        form_side.add_widget(hole_grid)
+        form_side.add_widget(self._build_stock_box())
+        form_side.add_widget(self._build_cam_tab_bar())
+        self.cam_tab_container = BoxLayout(orientation="vertical")
+        self.turning_panel = self._build_turning_tab()
+        self.hole_panel = self._build_hole_tab()
+        self.thread_panel = self._build_thread_tab()
+        self.cam_tab_container.add_widget(self.turning_panel)
+        form_side.add_widget(self.cam_tab_container)
 
         action_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
         generate = action_button("Generate", BLUE)
@@ -1110,9 +1141,13 @@ class CamPanel(BoxLayout):
 
         preview_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.52)
         paint(preview_side, PANEL_ALT)
-        preview_side.add_widget(section_label("Preview / G-code"))
-        self.preview = PreviewCanvas()
-        preview_side.add_widget(self.preview)
+        preview_side.add_widget(section_label("3D Part / Toolpath"))
+        preview_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=0.58)
+        self.part_view = PartIsoCanvas(size_hint_x=0.48)
+        preview_row.add_widget(self.part_view)
+        self.preview = PreviewCanvas(size_hint_x=0.52)
+        preview_row.add_widget(self.preview)
+        preview_side.add_widget(preview_row)
         self.gcode_editor = TextInput(
             text="",
             multiline=True,
@@ -1124,13 +1159,180 @@ class CamPanel(BoxLayout):
         )
         preview_side.add_widget(self.gcode_editor)
         self.add_widget(preview_side)
+        self._update_part_preview(stale=False)
 
-    def refresh(self, _state: MachineState) -> None:
-        return
+    def _build_stock_box(self) -> BoxLayout:
+        box = BoxLayout(orientation="vertical", spacing=6, size_hint_y=None, height=132)
+        paint(box, PANEL)
+        box.add_widget(section_label("Stock"))
+
+        stock_grid = GridLayout(cols=4, spacing=6)
+        self.stock_diameter_input = self._cam_field("20.0", title_text="Stock Diameter")
+        self.stock_length_input = self._cam_field("60.0", title_text="Stock Length")
+        self.face_allowance_input = self._cam_field("1.0", title_text="Face Allowance")
+        self.clearance_input = self._cam_field("3.0", title_text="Clearance")
+        self._add_labeled(stock_grid, "Dia", self.stock_diameter_input)
+        self._add_labeled(stock_grid, "Len", self.stock_length_input)
+        self._add_labeled(stock_grid, "Face", self.face_allowance_input)
+        self._add_labeled(stock_grid, "Clear", self.clearance_input)
+        box.add_widget(stock_grid)
+        return box
+
+    def _build_cam_tab_bar(self) -> BoxLayout:
+        tab_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
+        self.cam_tab_buttons: dict[str, ToggleButton] = {}
+        for name, label in (("turning", "Face/Rough"), ("hole", "Drill/Bore"), ("thread", "Thread")):
+            button = ToggleButton(
+                text=label,
+                group="cam_tab",
+                allow_no_selection=False,
+                font_size=18,
+                bold=True,
+                color=TEXT,
+                background_normal="",
+                background_down="",
+                background_color=BUTTON,
+            )
+            if name == "turning":
+                button.state = "down"
+            if name == "thread":
+                button.disabled = True
+            bind_release(button, lambda btn, tab=name: self._show_cam_tab(tab))
+            button.bind(state=lambda btn, _state: self._style_tab(btn))
+            self._style_tab(button)
+            self.cam_tab_buttons[name] = button
+            tab_row.add_widget(button)
+        return tab_row
+
+    def _build_turning_tab(self) -> BoxLayout:
+        tab = BoxLayout(orientation="vertical", spacing=8)
+        paint(tab, PANEL)
+
+        turn_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=184)
+        self.target_diameter_input = self._cam_field("16.0", title_text="Target Diameter")
+        self.target_length_input = self._cam_field("60.0", title_text="Target Length")
+        self.stock_leave_input = self._cam_field("0.5", title_text="Stock To Leave")
+        self.stepover_input = self._cam_field("0.5", title_text="Turn Stepover")
+        self.rough_feed_input = self._cam_field("80", title_text="Rough Feed")
+        self.finish_feed_input = self._cam_field("40", title_text="Finish Feed")
+        self.turn_rpm_input = self._cam_field("1200", title_text="Turning RPM")
+        self.turn_tool_input = self._cam_field("1", integer=True, title_text="Turning Tool")
+        self._add_labeled(turn_grid, "Target", self.target_diameter_input)
+        self._add_labeled(turn_grid, "Length", self.target_length_input)
+        self._add_labeled(turn_grid, "Leave", self.stock_leave_input)
+        self._add_labeled(turn_grid, "Step", self.stepover_input)
+        self._add_labeled(turn_grid, "Rough F", self.rough_feed_input)
+        self._add_labeled(turn_grid, "Finish F", self.finish_feed_input)
+        self._add_labeled(turn_grid, "RPM", self.turn_rpm_input)
+        self._add_labeled(turn_grid, "Tool", self.turn_tool_input)
+        tab.add_widget(turn_grid)
+
+        flag_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
+        for label, attr in (
+            ("Face", "face_enabled"),
+            ("Rough", "rough_enabled"),
+            ("Finish", "finish_enabled"),
+            ("Taper", "taper_enabled"),
+        ):
+            flag_row.add_widget(self._flag_button(label, attr))
+        tab.add_widget(flag_row)
+
+        self.tool_string_input = text_field("DCMT070204R")
+        self.tool_string_input.bind(on_text_validate=lambda *_: self._cam_input_changed())
+        tool_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=42)
+        tool_row.add_widget(Label(text="Insert", color=MUTED, font_size=17, size_hint_x=None, width=78))
+        tool_row.add_widget(self.tool_string_input)
+        tab.add_widget(tool_row)
+
+        taper_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=96)
+        self.taper_start_diameter_input = self._cam_field("16.0", title_text="Taper Start Diameter")
+        self.taper_end_diameter_input = self._cam_field("12.0", title_text="Taper End Diameter")
+        self.taper_start_z_input = self._cam_field("0.0", title_text="Taper Start Z")
+        self.taper_end_z_input = self._cam_field("-40.0", title_text="Taper End Z")
+        self._add_labeled(taper_grid, "Dia A", self.taper_start_diameter_input)
+        self._add_labeled(taper_grid, "Dia B", self.taper_end_diameter_input)
+        self._add_labeled(taper_grid, "Z A", self.taper_start_z_input)
+        self._add_labeled(taper_grid, "Z B", self.taper_end_z_input)
+        tab.add_widget(taper_grid)
+        return tab
+
+    def _build_hole_tab(self) -> BoxLayout:
+        tab = BoxLayout(orientation="vertical", spacing=8)
+        paint(tab, PANEL)
+
+        hole_flag_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
+        for label, attr in (
+            ("Center", "center_enabled"),
+            ("Drill", "drill_enabled"),
+            ("Bore", "bore_enabled"),
+        ):
+            hole_flag_row.add_widget(self._flag_button(label, attr))
+        tab.add_widget(hole_flag_row)
+
+        hole_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=184)
+        self.center_depth_input = self._cam_field("2.0", title_text="Center Drill Depth")
+        self.drill_diameter_input = self._cam_field("6.0", title_text="Drill Diameter")
+        self.drill_depth_input = self._cam_field("30.0", title_text="Drill Depth")
+        self.bore_diameter_input = self._cam_field("10.0", title_text="Bore Diameter")
+        self.bore_depth_input = self._cam_field("25.0", title_text="Bore Depth")
+        self.boring_step_input = self._cam_field("0.5", title_text="Boring Stepover")
+        self.hole_rpm_input = self._cam_field("1000", title_text="Hole RPM")
+        self.boring_tool_input = self._cam_field("4", integer=True, title_text="Boring Tool")
+        self._add_labeled(hole_grid, "Center Z", self.center_depth_input)
+        self._add_labeled(hole_grid, "Drill dia", self.drill_diameter_input)
+        self._add_labeled(hole_grid, "Drill Z", self.drill_depth_input)
+        self._add_labeled(hole_grid, "Bore dia", self.bore_diameter_input)
+        self._add_labeled(hole_grid, "Bore Z", self.bore_depth_input)
+        self._add_labeled(hole_grid, "Bore step", self.boring_step_input)
+        self._add_labeled(hole_grid, "RPM", self.hole_rpm_input)
+        self._add_labeled(hole_grid, "Bore tool", self.boring_tool_input)
+        tab.add_widget(hole_grid)
+        return tab
+
+    def _build_thread_tab(self) -> BoxLayout:
+        tab = BoxLayout(orientation="vertical", spacing=8)
+        paint(tab, PANEL)
+        tab.add_widget(section_label("Threading"))
+        placeholder = Label(
+            text="Reserved for threading cycles",
+            color=MUTED,
+            font_size=22,
+        )
+        tab.add_widget(placeholder)
+        return tab
+
+    def refresh(self, state: MachineState) -> None:
+        self.preview.set_tool_position(x_mm=state.work_x_mm, z_mm=state.work_z_mm)
+
+    def _cam_field(
+        self,
+        text: str,
+        *,
+        integer: bool = False,
+        title_text: str = "Number",
+    ) -> NumberEntryButton:
+        return field_input(
+            text,
+            integer=integer,
+            title_text=title_text,
+            on_value=lambda _value: self._cam_input_changed(),
+        )
 
     def _add_labeled(self, grid: GridLayout, label: str, widget) -> None:
         grid.add_widget(Label(text=label, color=MUTED, font_size=17))
         grid.add_widget(widget)
+
+    def _show_cam_tab(self, tab_name: str) -> None:
+        if tab_name == "thread":
+            return
+        self.cam_tab_container.clear_widgets()
+        if tab_name == "hole":
+            self.cam_tab_container.add_widget(self.hole_panel)
+        else:
+            self.cam_tab_container.add_widget(self.turning_panel)
+
+    def _style_tab(self, button: ToggleButton) -> None:
+        button.background_color = BLUE if button.state == "down" else BUTTON
 
     def _flag_button(self, label: str, attr: str) -> ToggleButton:
         button = ToggleButton(
@@ -1151,9 +1353,37 @@ class CamPanel(BoxLayout):
 
     def _set_flag(self, attr: str, button: ToggleButton) -> None:
         setattr(self, attr, button.state == "down")
+        self._cam_input_changed()
 
     def _style_flag(self, button: ToggleButton) -> None:
         button.background_color = GREEN if button.state == "down" else BUTTON
+
+    def _cam_input_changed(self) -> None:
+        self.generated_gcode = ""
+        if hasattr(self, "gcode_editor"):
+            self.gcode_editor.text = ""
+        self._update_part_preview(stale=True)
+
+    def _update_part_preview(self, *, stale: bool, set_status: bool = True) -> bool:
+        if not hasattr(self, "preview"):
+            return False
+        try:
+            job = self._job_from_fields()
+            outline = build_part_outline(job)
+        except ValueError as exc:
+            self.preview.set_preview(None, part_outline=None)
+            if set_status:
+                self._set_status(str(exc), RED)
+            return False
+        self.preview.set_preview(None, part_outline=outline)
+        solid_error = self.part_view.set_job(job) if hasattr(self, "part_view") else ""
+        if set_status:
+            if solid_error:
+                self._set_status(solid_error, RED)
+            else:
+                message = "Part view updated; generate toolpath/G-code" if stale else "Part view ready"
+                self._set_status(message, TEXT)
+        return not solid_error
 
     def _generate(self) -> bool:
         try:
@@ -1167,7 +1397,7 @@ class CamPanel(BoxLayout):
         except (ValueError, CamGenerationError, GCodeParseError) as exc:
             self.generated_gcode = ""
             self.gcode_editor.text = ""
-            self.preview.set_preview(None, part_outline=None)
+            self._update_part_preview(stale=False, set_status=False)
             self._set_status(str(exc), RED)
             return False
 
@@ -1187,6 +1417,8 @@ class CamPanel(BoxLayout):
         self.generated_gcode = program.gcode
         self.gcode_editor.text = program.gcode
         self.preview.set_preview(preview_path, part_outline=program.part_outline)
+        if hasattr(self, "part_view"):
+            self.part_view.set_job(job)
         self._set_status(
             f"Generated {len(result.actions)} action(s), {len(preview_path.segments)} move(s)",
             TEXT,
@@ -1689,11 +1921,245 @@ class SetupPanel(BoxLayout):
         self.refresh(self.service.state)
 
 
+class PartIsoCanvas(Widget):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.mesh = None
+        self.job: LatheCamJob | None = None
+        self.error_message = ""
+        self.bind(pos=lambda *_: self._redraw(), size=lambda *_: self._redraw())
+
+    def set_job(self, job: LatheCamJob) -> str:
+        try:
+            self.mesh = build_part_mesh(job)
+            self.job = job
+            self.error_message = ""
+        except (CamSolidError, CamValidationError) as exc:
+            self.mesh = None
+            self.job = None
+            self.error_message = str(exc)
+        self._redraw()
+        return self.error_message
+
+    def _redraw(self) -> None:
+        self.canvas.clear()
+        with self.canvas:
+            Color(0.045, 0.047, 0.05, 1)
+            Rectangle(pos=self.pos, size=self.size)
+            Color(0.24, 0.25, 0.27, 1)
+            Line(rectangle=(self.x + 8, self.y + 8, max(0, self.width - 16), max(0, self.height - 16)), width=1)
+
+            if self.mesh is None:
+                return
+
+            vertices = self.mesh.vertices
+            faces = self.mesh.faces
+            if len(vertices) == 0 or len(faces) == 0:
+                return
+
+            projected = [self._project(vertex) for vertex in vertices]
+            min_x = min(point[0] for point in projected)
+            max_x = max(point[0] for point in projected)
+            min_y = min(point[1] for point in projected)
+            max_y = max(point[1] for point in projected)
+            if max_x - min_x <= 1e-9 or max_y - min_y <= 1e-9:
+                return
+
+            pad = 20
+            draw_w = max(1.0, self.width - 2 * pad)
+            draw_h = max(1.0, self.height - 2 * pad)
+            scale = min(draw_w / (max_x - min_x), draw_h / (max_y - min_y))
+            offset_x = self.x + pad + (draw_w - (max_x - min_x) * scale) / 2.0
+            offset_y = self.y + pad + (draw_h - (max_y - min_y) * scale) / 2.0
+
+            def screen_point(vertex_index: int) -> tuple[float, float]:
+                px, py, _depth = projected[vertex_index]
+                return (
+                    offset_x + (px - min_x) * scale,
+                    offset_y + (py - min_y) * scale,
+                )
+
+            face_items = []
+            normals = self.mesh.face_normals
+            for face_index, face in enumerate(faces):
+                points = [screen_point(int(vertex_index)) for vertex_index in face]
+                if _triangle_area(points) < 0.25:
+                    continue
+                depth = sum(projected[int(vertex_index)][2] for vertex_index in face) / 3.0
+                normal = normals[face_index] if face_index < len(normals) else (0.0, 0.0, 1.0)
+                shade = self._face_shade(normal)
+                face_items.append((depth, points, shade))
+
+            for _depth, points, shade in sorted(face_items, key=lambda item: item[0]):
+                Color(0.50 * shade, 0.58 * shade, 0.64 * shade, 1)
+                Mesh(
+                    vertices=[
+                        points[0][0],
+                        points[0][1],
+                        0,
+                        0,
+                        points[1][0],
+                        points[1][1],
+                        0,
+                        0,
+                        points[2][0],
+                        points[2][1],
+                        0,
+                        0,
+                    ],
+                    indices=[0, 1, 2],
+                    mode="triangles",
+                )
+
+            self._draw_reference_edges(projected, vertices)
+
+    @staticmethod
+    def _project(vertex) -> tuple[float, float, float]:
+        lathe_z = float(vertex[0])
+        radial_y = float(vertex[1])
+        radial_x = float(vertex[2])
+        recede = -lathe_z
+        projected_x = recede * 0.86 + radial_y * 0.36
+        projected_y = radial_x * 0.94 + radial_y * 0.26 + recede * 0.14
+        depth = lathe_z * 1.0 + radial_y * 0.42 + radial_x * 0.12
+        return projected_x, projected_y, depth
+
+    @staticmethod
+    def _face_shade(normal) -> float:
+        axial = float(normal[0])
+        radial_y = float(normal[1])
+        radial_x = float(normal[2])
+        if axial > 0.55:
+            return 0.95
+        if axial < -0.55:
+            return 0.50
+        return max(0.62, min(0.84, 0.72 + radial_x * 0.10 + radial_y * 0.05))
+
+    def _draw_reference_edges(self, projected, vertices) -> None:
+        stations = self._ring_stations(vertices)
+        if not stations:
+            return
+
+        front_z = max(stations)
+        back_z = min(stations)
+        front_outer = stations[front_z]
+        front_inner = self._front_inner_radius()
+
+        Color(0.78, 0.86, 0.91, 1)
+        self._draw_ring(front_z, front_outer, width=2.6)
+        if front_inner > 0.0:
+            Color(0.035, 0.04, 0.045, 1)
+            self._fill_ring_disc(front_z, front_inner)
+            Color(0.86, 0.70, 0.38, 1)
+            self._draw_ring(front_z, front_inner, width=2.2)
+
+        Color(0.38, 0.45, 0.50, 0.78)
+        self._draw_ring(back_z, stations[back_z], width=1.4)
+
+        for angle, width in ((math.pi / 2.0, 1.9), (-math.pi / 2.0, 1.5)):
+            points: list[float] = []
+            for z_mm in sorted(stations, reverse=True):
+                radius = stations[z_mm]
+                px, py, _depth = self._project(
+                    (
+                        z_mm,
+                        radius * math.cos(angle),
+                        radius * math.sin(angle),
+                    )
+                )
+                screen_x, screen_y = self._screen_from_projected(px, py, projected)
+                points.extend([screen_x, screen_y])
+            Color(0.70, 0.78, 0.83, 0.92)
+            Line(points=points, width=width)
+
+    def _ring_stations(self, vertices) -> dict[float, float]:
+        stations: dict[float, float] = {}
+        for vertex in vertices:
+            z_mm = round(float(vertex[0]), 6)
+            radius = math.hypot(float(vertex[1]), float(vertex[2]))
+            stations[z_mm] = max(stations.get(z_mm, 0.0), radius)
+        return stations
+
+    def _front_inner_radius(self) -> float:
+        if self.job is None:
+            return 0.0
+        if self.job.hole.bore:
+            return self.job.hole.bore_diameter_mm / 2.0
+        if self.job.hole.drill:
+            return self.job.hole.drill_diameter_mm / 2.0
+        if self.job.hole.center_drill:
+            return min(self.job.hole.drill_diameter_mm / 2.0, self.job.stock.diameter_mm / 8.0)
+        return 0.0
+
+    def _draw_ring(self, z_mm: float, radius: float, *, width: float) -> None:
+        points: list[float] = []
+        for index in range(65):
+            angle = math.tau * index / 64
+            px, py, _depth = self._project(
+                (
+                    z_mm,
+                    radius * math.cos(angle),
+                    radius * math.sin(angle),
+                )
+            )
+            screen_x, screen_y = self._screen_from_projected(px, py)
+            points.extend([screen_x, screen_y])
+        Line(points=points, width=width)
+
+    def _fill_ring_disc(self, z_mm: float, radius: float) -> None:
+        center_x, center_y = self._screen_from_projected(*self._project((z_mm, 0.0, 0.0))[:2])
+        vertices = [center_x, center_y, 0, 0]
+        indices: list[int] = []
+        for index in range(64):
+            angle = math.tau * index / 64
+            px, py, _depth = self._project(
+                (
+                    z_mm,
+                    radius * math.cos(angle),
+                    radius * math.sin(angle),
+                )
+            )
+            screen_x, screen_y = self._screen_from_projected(px, py)
+            vertices.extend([screen_x, screen_y, 0, 0])
+            if index < 63:
+                indices.extend([0, index + 1, index + 2])
+            else:
+                indices.extend([0, index + 1, 1])
+        Mesh(vertices=vertices, indices=indices, mode="triangles")
+
+    def _screen_from_projected(
+        self,
+        px: float,
+        py: float,
+        projected: list[tuple[float, float, float]] | None = None,
+    ) -> tuple[float, float]:
+        if projected is None:
+            if self.mesh is None:
+                return self.x, self.y
+            projected = [self._project(vertex) for vertex in self.mesh.vertices]
+        min_x = min(point[0] for point in projected)
+        max_x = max(point[0] for point in projected)
+        min_y = min(point[1] for point in projected)
+        max_y = max(point[1] for point in projected)
+        pad = 20
+        draw_w = max(1.0, self.width - 2 * pad)
+        draw_h = max(1.0, self.height - 2 * pad)
+        scale = min(draw_w / max(1e-9, max_x - min_x), draw_h / max(1e-9, max_y - min_y))
+        offset_x = self.x + pad + (draw_w - (max_x - min_x) * scale) / 2.0
+        offset_y = self.y + pad + (draw_h - (max_y - min_y) * scale) / 2.0
+        return (
+            offset_x + (px - min_x) * scale,
+            offset_y + (py - min_y) * scale,
+        )
+
+
 class PreviewCanvas(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.preview_path: PreviewPath | None = None
         self.part_outline: list[PreviewSegment] = []
+        self.tool_x_mm: float | None = None
+        self.tool_z_mm: float | None = None
         self.bind(pos=lambda *_: self._redraw(), size=lambda *_: self._redraw())
 
     def set_preview(
@@ -1706,6 +2172,11 @@ class PreviewCanvas(Widget):
         self.part_outline = part_outline or []
         self._redraw()
 
+    def set_tool_position(self, *, x_mm: float, z_mm: float) -> None:
+        self.tool_x_mm = x_mm
+        self.tool_z_mm = z_mm
+        self._redraw()
+
     def _redraw(self) -> None:
         self.canvas.clear()
         with self.canvas:
@@ -1714,7 +2185,12 @@ class PreviewCanvas(Widget):
             Color(0.24, 0.25, 0.27, 1)
             Line(rectangle=(self.x + 8, self.y + 8, max(0, self.width - 16), max(0, self.height - 16)), width=1)
 
-            if (self.preview_path is None or not self.preview_path.segments) and not self.part_outline:
+            has_tool = self.tool_x_mm is not None and self.tool_z_mm is not None
+            if (
+                (self.preview_path is None or not self.preview_path.segments)
+                and not self.part_outline
+                and not has_tool
+            ):
                 return
 
             all_segments = []
@@ -1723,6 +2199,9 @@ class PreviewCanvas(Widget):
             all_segments.extend(self.part_outline)
             xs = [value for segment in all_segments for value in (segment.start_x_mm, segment.end_x_mm)]
             zs = [value for segment in all_segments for value in (segment.start_z_mm, segment.end_z_mm)]
+            if has_tool:
+                xs.append(self.tool_x_mm)
+                zs.append(self.tool_z_mm)
             min_z, max_z = min(zs), max(zs)
             min_x, max_x = min(xs), max(xs)
             if min_z == max_z:
@@ -1750,12 +2229,13 @@ class PreviewCanvas(Widget):
                 Line(points=[self.x + pad, zero_x_y, self.x + self.width - pad, zero_x_y], width=1)
 
             for segment in self.part_outline:
-                Color(0.42, 0.55, 0.66, 1)
+                Color(*(0.65, 0.48, 0.22, 1) if segment.mode == "hole" else (0.42, 0.55, 0.66, 1))
                 x0, y0 = map_point(segment.start_x_mm, segment.start_z_mm)
                 x1, y1 = map_point(segment.end_x_mm, segment.end_z_mm)
                 Line(points=[x0, y0, x1, y1], width=2.4)
 
             if self.preview_path is None:
+                self._draw_tool_marker(map_point)
                 return
 
             for segment in self.preview_path.segments:
@@ -1763,6 +2243,47 @@ class PreviewCanvas(Widget):
                 x0, y0 = map_point(segment.start_x_mm, segment.start_z_mm)
                 x1, y1 = map_point(segment.end_x_mm, segment.end_z_mm)
                 Line(points=[x0, y0, x1, y1], width=2.0 if segment.mode == "feed" else 1.2)
+
+            self._draw_tool_marker(map_point)
+
+    def _draw_tool_marker(self, map_point: Callable[[float, float], tuple[float, float]]) -> None:
+        if self.tool_x_mm is None or self.tool_z_mm is None:
+            return
+        tool_x, tool_y = map_point(self.tool_x_mm, self.tool_z_mm)
+        size = max(8.0, min(16.0, min(self.width, self.height) * 0.035))
+        Color(0.96, 0.88, 0.22, 1)
+        Mesh(
+            vertices=[
+                tool_x,
+                tool_y + size,
+                0,
+                0,
+                tool_x - size * 0.86,
+                tool_y - size * 0.72,
+                0,
+                0,
+                tool_x + size * 0.86,
+                tool_y - size * 0.72,
+                0,
+                0,
+            ],
+            indices=[0, 1, 2],
+            mode="triangles",
+        )
+        Color(0.08, 0.08, 0.06, 1)
+        Line(
+            points=[
+                tool_x,
+                tool_y + size,
+                tool_x - size * 0.86,
+                tool_y - size * 0.72,
+                tool_x + size * 0.86,
+                tool_y - size * 0.72,
+                tool_x,
+                tool_y + size,
+            ],
+            width=1.4,
+        )
 
 
 def paint(widget, color) -> None:
@@ -1836,11 +2357,13 @@ def field_input(
     *,
     integer: bool = False,
     title_text: str = "Number",
+    on_value: Callable[[float | int], None] | None = None,
 ) -> NumberEntryButton:
     return NumberEntryButton(
         text=text,
         integer=integer,
         title_text=title_text,
+        on_value=on_value,
         font_size=20,
     )
 
@@ -1907,3 +2430,14 @@ def optional_int(value: str) -> int | None:
     if not text:
         return None
     return int(float(text))
+
+
+def _triangle_area(points: list[tuple[float, float]]) -> float:
+    return abs(
+        (
+            points[0][0] * (points[1][1] - points[2][1])
+            + points[1][0] * (points[2][1] - points[0][1])
+            + points[2][0] * (points[0][1] - points[1][1])
+        )
+        / 2.0
+    )

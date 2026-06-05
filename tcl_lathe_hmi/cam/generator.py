@@ -34,7 +34,7 @@ def generate_cam_program(job: LatheCamJob) -> GeneratedCamProgram:
     lines.extend(["M5", ""])
     return GeneratedCamProgram(
         gcode="\n".join(lines),
-        part_outline=_part_outline_segments(job),
+        part_outline=build_part_outline(job),
     )
 
 
@@ -277,9 +277,9 @@ def _liblathe_part_segments(job: LatheCamJob, point_cls, segment_cls) -> list[An
     ]
 
 
-def _part_outline_segments(job: LatheCamJob) -> list[PreviewSegment]:
+def build_part_outline(job: LatheCamJob) -> list[PreviewSegment]:
     points = finished_profile_points(job)
-    return [
+    segments = [
         PreviewSegment(
             start_x_mm=start_x,
             start_z_mm=start_z,
@@ -290,6 +290,39 @@ def _part_outline_segments(job: LatheCamJob) -> list[PreviewSegment]:
         )
         for (start_x, start_z), (end_x, end_z) in zip(points, points[1:])
     ]
+    hole_diameter = 0.0
+    hole_depth = 0.0
+    if job.hole.bore:
+        hole_diameter = job.hole.bore_diameter_mm
+        hole_depth = job.hole.bore_depth_mm
+    elif job.hole.drill:
+        hole_diameter = job.hole.drill_diameter_mm
+        hole_depth = job.hole.drill_depth_mm
+
+    if hole_diameter > 0.0 and hole_depth > 0.0:
+        front = job.stock.z_front_mm
+        back = front - hole_depth
+        segments.extend(
+            [
+                PreviewSegment(
+                    start_x_mm=hole_diameter,
+                    start_z_mm=front,
+                    end_x_mm=hole_diameter,
+                    end_z_mm=back,
+                    mode="hole",
+                    line_number=0,
+                ),
+                PreviewSegment(
+                    start_x_mm=0.0,
+                    start_z_mm=back,
+                    end_x_mm=hole_diameter,
+                    end_z_mm=back,
+                    mode="hole",
+                    line_number=0,
+                ),
+            ]
+        )
+    return segments
 
 
 def _tool_change_line(tool_number: int, station: int | None) -> str:

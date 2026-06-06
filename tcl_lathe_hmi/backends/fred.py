@@ -6,7 +6,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from tcl_lathe_hmi.config import MachineConfig
 from tcl_lathe_hmi.machine import (
@@ -450,15 +450,15 @@ def _apply_snapshot(
     commanded_spindle: SpindleState,
     config: MachineConfig,
 ) -> MachineState:
-    actual_rpm = float(snapshot.get("spindle_rpm", state.spindle.actual_rpm))
+    actual_rpm = _float_value(snapshot.get("spindle_rpm"), state.spindle.actual_rpm)
     target = commanded_spindle.target_rpm
     at_speed = _spindle_at_speed(commanded_spindle.commanded_on, target, actual_rpm, config)
     spindle = replace(commanded_spindle, actual_rpm=actual_rpm, at_speed=at_speed)
 
     return replace(
         state,
-        x_mm=float(snapshot.get("x_mm", state.x_mm)),
-        z_mm=float(snapshot.get("z_mm", state.z_mm)),
+        x_mm=_float_value(snapshot.get("x_mm"), state.x_mm),
+        z_mm=_float_value(snapshot.get("z_mm"), state.z_mm),
         x_counts=_optional_int(snapshot.get("x_counts")),
         z_counts=_optional_int(snapshot.get("z_counts")),
         spindle=spindle,
@@ -478,10 +478,7 @@ def _motion_at_target(
 
 
 def _snapshot_generation(snapshot: dict[str, object]) -> int | None:
-    value = snapshot.get("generation")
-    if value is None:
-        return None
-    return int(value)
+    return _optional_int(snapshot.get("generation"))
 
 
 def _generation_after(current: int, previous: int) -> bool:
@@ -513,7 +510,13 @@ def _spindle_at_speed(
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
-    return int(value)
+    return int(cast(Any, value))
+
+
+def _float_value(value: object, default: float) -> float:
+    if value is None:
+        return default
+    return float(cast(Any, value))
 
 
 def _validate_station(station: int, label: str) -> None:

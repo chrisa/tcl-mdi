@@ -55,7 +55,11 @@ def test_export_preserves_tools_without_turret_station():
 
 def test_sample_tool_table_has_twelve_tools_and_eight_turret_stations():
     table = sample_tool_table()
+    turret_tools = [table.get(tool_number) for tool_number in range(1, 9)]
+    manual_tools = [table.get(tool_number) for tool_number in range(9, 13)]
 
     assert [tool.tool_number for tool in table.tools] == list(range(1, 13))
-    assert [table.get(tool_number).station for tool_number in range(1, 9)] == list(range(1, 9))
-    assert [table.get(tool_number).station for tool_number in range(9, 13)] == [None] * 4
+    assert all(tool is not None for tool in turret_tools)
+    assert all(tool is not None for tool in manual_tools)
+    assert [tool.station for tool in turret_tools if tool is not None] == list(range(1, 9))
+    assert [tool.station for tool in manual_tools if tool is not None] == [None] * 4

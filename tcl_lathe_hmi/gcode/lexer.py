@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from pygments.lexer import RegexLexer, bygroups
 from pygments.style import Style
 from pygments.token import Comment, Error, Keyword, Name, Number, Operator, Text
@@ -9,7 +11,7 @@ class LinuxCncGCodeLexer(RegexLexer):
     name = "LinuxCNC G-code"
     aliases = ["linuxcnc-gcode", "gcode", "ngc"]
     filenames = ["*.ngc", "*.gcode", "*.nc", "*.tap"]
-    flags = 0
+    flags = re.NOFLAG
 
     _number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
     _word_letters = r"XYZABCUVWIJKRFPQDLHST"

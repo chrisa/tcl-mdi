@@ -252,10 +252,10 @@ def _liblathe_commands_to_gcode(commands: list[Any]) -> list[str]:
                 center_z,
                 clockwise=movement == "G2",
             ):
-                line_params = {"X": point_x * 2.0, "Z": point_z}
+                arc_line_params = {"X": point_x * 2.0, "Z": point_z}
                 if modal_feed is not None:
-                    line_params["F"] = modal_feed
-                lines.append(_gcode_line("G1", line_params))
+                    arc_line_params["F"] = modal_feed
+                lines.append(_gcode_line("G1", arc_line_params))
             current_x = target_x
             current_z = target_z
             continue

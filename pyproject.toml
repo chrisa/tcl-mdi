@@ -13,7 +13,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.10",
     "pytest>=7.4",
+    "types-Pygments>=2.19",
 ]
 
 [project.scripts]
@@ -26,3 +28,15 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.mypy]
+check_untyped_defs = true
+files = ["tcl_lathe_hmi", "tests"]
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "kivy.*",
+    "liblathe.*",
+]
+ignore_missing_imports = true

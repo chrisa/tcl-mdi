@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .actions import CanonicalAction, MoveAction, ThreadSyncAction
@@ -25,7 +26,7 @@ class PreviewPath:
 
 
 def build_preview(
-    actions: list[CanonicalAction],
+    actions: Sequence[CanonicalAction],
     *,
     start_x_mm: float = 0.0,
     start_z_mm: float = 0.0,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 from tcl_lathe_hmi.config import MachineConfig
 from tcl_lathe_hmi.gcode import (
@@ -49,16 +50,12 @@ class MachineService:
             self._refresh_active_tool_offsets_from_table()
 
     def set_backend(self, backend: MachineBackend) -> MachineState:
-        preserved_state = self._preserved_state_kwargs(self.state)
         try:
             self.backend.disconnect()
         except BackendError:
             pass
         self.backend = backend
-        self.state = MachineState(
-            status_message=f"{backend.name}: disconnected",
-            **preserved_state,
-        )
+        self.state = self._disconnected_state(f"{backend.name}: disconnected")
         return self.state
 
     def connect(self) -> MachineState:
@@ -77,14 +74,10 @@ class MachineService:
         return self.state
 
     def disconnect(self) -> MachineState:
-        preserved_state = self._preserved_state_kwargs(self.state)
         try:
             self.backend.disconnect()
         finally:
-            self.state = MachineState(
-                status_message=f"{self.backend.name}: disconnected",
-                **preserved_state,
-            )
+            self.state = self._disconnected_state(f"{self.backend.name}: disconnected")
         return self.state
 
     def poll(self) -> MachineState:
@@ -372,6 +365,7 @@ class MachineService:
             return False
         if not self._valid_station(current_station, "current station"):
             return False
+        assert target_station is not None
 
         try:
             self.backend.select_tool(
@@ -455,9 +449,14 @@ class MachineService:
         return self._teach_tool_offset(selected_tool, x_offset_mm=offset)
 
     def set_display_mode(self, mode: str) -> None:
-        if mode not in {"work", "machine"}:
+        display_mode: Literal["work", "machine"]
+        if mode == "work":
+            display_mode = "work"
+        elif mode == "machine":
+            display_mode = "machine"
+        else:
             raise ValueError(f"unsupported display mode: {mode}")
-        self.state = replace(self.state, display_mode=mode)
+        self.state = replace(self.state, display_mode=display_mode)
         self.save_settings()
 
     def set_work_position(
@@ -466,13 +465,22 @@ class MachineService:
         x_mm: float | None = None,
         z_mm: float | None = None,
     ) -> None:
-        kwargs: dict[str, float] = {}
+        work_x_offset_mm = self.state.work_x_offset_mm
+        work_z_offset_mm = self.state.work_z_offset_mm
+        changed = False
         if x_mm is not None:
-            kwargs["work_x_offset_mm"] = x_mm - self.state.x_mm - self.state.tool_x_offset_mm
+            work_x_offset_mm = x_mm - self.state.x_mm - self.state.tool_x_offset_mm
+            changed = True
         if z_mm is not None:
-            kwargs["work_z_offset_mm"] = z_mm - self.state.z_mm - self.state.tool_z_offset_mm
-        if kwargs:
-            self.state = replace(self.state, **kwargs, status_message="Work offset updated")
+            work_z_offset_mm = z_mm - self.state.z_mm - self.state.tool_z_offset_mm
+            changed = True
+        if changed:
+            self.state = replace(
+                self.state,
+                work_x_offset_mm=work_x_offset_mm,
+                work_z_offset_mm=work_z_offset_mm,
+                status_message="Work offset updated",
+            )
             self.save_settings()
 
     def zero_work_axis(self, axis: str) -> bool:
@@ -652,24 +660,24 @@ class MachineService:
             z_max_limit_mm=self.state.z_max_limit_mm,
         )
 
-    @staticmethod
-    def _preserved_state_kwargs(state: MachineState) -> dict[str, object]:
-        return {
-            "active_tool": state.active_tool,
-            "turret_station": state.turret_station,
-            "work_x_offset_mm": state.work_x_offset_mm,
-            "work_z_offset_mm": state.work_z_offset_mm,
-            "tool_x_offset_mm": state.tool_x_offset_mm,
-            "tool_z_offset_mm": state.tool_z_offset_mm,
-            "pending_tool": state.pending_tool,
-            "pending_turret_station": state.pending_turret_station,
-            "display_mode": state.display_mode,
-            "soft_limits_enabled": state.soft_limits_enabled,
-            "x_min_limit_mm": state.x_min_limit_mm,
-            "x_max_limit_mm": state.x_max_limit_mm,
-            "z_min_limit_mm": state.z_min_limit_mm,
-            "z_max_limit_mm": state.z_max_limit_mm,
-        }
+    def _disconnected_state(self, status_message: str) -> MachineState:
+        return MachineState(
+            status_message=status_message,
+            active_tool=self.state.active_tool,
+            turret_station=self.state.turret_station,
+            work_x_offset_mm=self.state.work_x_offset_mm,
+            work_z_offset_mm=self.state.work_z_offset_mm,
+            tool_x_offset_mm=self.state.tool_x_offset_mm,
+            tool_z_offset_mm=self.state.tool_z_offset_mm,
+            pending_tool=self.state.pending_tool,
+            pending_turret_station=self.state.pending_turret_station,
+            display_mode=self.state.display_mode,
+            soft_limits_enabled=self.state.soft_limits_enabled,
+            x_min_limit_mm=self.state.x_min_limit_mm,
+            x_max_limit_mm=self.state.x_max_limit_mm,
+            z_min_limit_mm=self.state.z_min_limit_mm,
+            z_max_limit_mm=self.state.z_max_limit_mm,
+        )
 
     def _limits_error_for_target(
         self,

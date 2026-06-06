@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 from .models import LatheCamJob, finished_profile_points
 
@@ -76,7 +77,7 @@ def build_part_mesh(job: LatheCamJob, *, sections: int = 56):
     )
     mesh.update_faces(mesh.nondegenerate_faces())
     mesh.remove_unreferenced_vertices()
-    mesh.visual.face_colors = [166, 181, 194, 255]
+    cast(Any, mesh.visual).face_colors = [166, 181, 194, 255]
     return mesh
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from tcl_lathe_hmi.backends import fred as fred_module
 from tcl_lathe_hmi.backends.fred import FredBackend
 from tcl_lathe_hmi.config import MachineConfig
+from tcl_lathe_hmi.machine import CommandRejectedError
 
 
 class FakeFredClient:
@@ -77,6 +78,13 @@ class FakeFredClient:
 
     def wait_idle(self, timeout_ms=None):
         self.idle = True
+
+
+class FakeFredClientWithThreadSync(FakeFredClient):
+    def thread_sync_move(self, **kwargs):
+        self.commands.append(("thread", kwargs))
+        self.idle = False
+        return True
 
 
 def test_fred_backend_connects_and_polls_snapshot():
@@ -190,3 +198,46 @@ def test_fred_backend_skips_toolchanger_for_same_station():
         "tool",
         {"current_station": 3, "target_station": 3, "slew": 61, "wait": False},
     )
+
+
+def test_fred_backend_rejects_thread_sync_when_client_api_is_missing():
+    FakeFredClient.instances = []
+    backend = FredBackend(MachineConfig(), client_factory=FakeFredClient)
+    backend.connect()
+
+    try:
+        backend.thread_sync_move(z_mm=-20.0, pitch=1.5)
+    except CommandRejectedError as exc:
+        assert "FredClient.thread_sync_move" in str(exc)
+    else:
+        raise AssertionError("expected thread sync rejection")
+
+
+def test_fred_backend_sends_thread_sync_move_and_waits_for_target_feedback():
+    FakeFredClient.instances = []
+    backend = FredBackend(MachineConfig(), client_factory=FakeFredClientWithThreadSync)
+    backend.connect()
+    client = FakeFredClient.instances[-1]
+
+    backend.thread_sync_move(z_mm=-20.0, pitch=1.5, slew=61)
+
+    assert client.commands[-1] == (
+        "thread",
+        {
+            "z": -20.0,
+            "pitch": 1.5,
+            "slew": 61,
+            "wait": False,
+        },
+    )
+    assert backend.poll().busy
+
+    client.idle = True
+    state = backend.poll()
+    assert state.busy
+    assert state.status_message == "fred: waiting for motion feedback"
+
+    client.set_snapshot(z_mm=-22.5)
+    state = backend.poll()
+    assert not state.busy
+    assert state.z_mm == -22.5

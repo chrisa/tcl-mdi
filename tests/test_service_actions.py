@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tcl_lathe_hmi.backends.sim import SimBackend
 from tcl_lathe_hmi.config import MachineConfig
-from tcl_lathe_hmi.gcode import MoveAction, ToolChangeAction
+from tcl_lathe_hmi.gcode import DwellAction, MoveAction, ThreadSyncAction, ToolChangeAction
 from tcl_lathe_hmi.machine import MachineService
 from tcl_lathe_hmi.tools import ToolRecord
 
@@ -28,6 +28,63 @@ def test_service_executes_move_action_as_delta():
 
     assert service.state.x_mm == 1.0
     assert service.state.z_mm == -2.0
+
+
+def test_service_executes_thread_sync_action_as_z_delta():
+    config = MachineConfig(sim_motion_time_s=0.01)
+    service = MachineService(SimBackend(config))
+    service.connect()
+    assert service.jog_delta(x_mm=16.0, z_mm=0.0, mode="rapid")
+    service.backend.wait_idle(timeout_ms=500)
+    service.poll()
+
+    action = ThreadSyncAction(
+        line_number=4,
+        target_z_mm=-20.0,
+        pitch_mm=1.5,
+    )
+
+    assert service.execute_action(action)
+    assert service.state.busy
+    service.backend.wait_idle(timeout_ms=500)
+    service.poll()
+
+    assert service.state.x_mm == 16.0
+    assert service.state.z_mm == -20.0
+
+
+def test_service_rejects_thread_sync_action_outside_soft_limits():
+    config = MachineConfig(sim_motion_time_s=0.01, z_min_limit_mm=-10.0, z_max_limit_mm=10.0)
+    service = MachineService(SimBackend(config), config=config)
+    service.connect()
+
+    action = ThreadSyncAction(line_number=4, target_z_mm=-20.0, pitch_mm=1.5)
+
+    assert not service.execute_action(action)
+    assert "Line 4" in service.state.status_message
+    assert "outside soft limits" in service.state.status_message
+
+
+def test_service_rejects_thread_sync_action_when_not_ready():
+    service = MachineService(SimBackend(MachineConfig()))
+
+    action = ThreadSyncAction(line_number=4, target_z_mm=-20.0, pitch_mm=1.5)
+
+    assert not service.execute_action(action)
+    assert "not ready" in service.state.status_message
+
+
+def test_service_executes_dwell_action():
+    config = MachineConfig(sim_motion_time_s=0.01)
+    service = MachineService(SimBackend(config))
+    service.connect()
+
+    assert service.execute_action(DwellAction(line_number=2, seconds=0.01))
+    assert service.state.busy
+    service.backend.wait_idle(timeout_ms=500)
+    service.poll()
+
+    assert not service.state.busy
 
 
 def test_service_rejects_automatic_tool_change_when_current_station_unknown():

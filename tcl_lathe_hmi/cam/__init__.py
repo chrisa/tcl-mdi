@@ -9,6 +9,7 @@ from .models import (
     LatheCamJob,
     StockSpec,
     TaperSpec,
+    ThreadSpec,
     TurningSpec,
     CamValidationError,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "LatheCamJob",
     "StockSpec",
     "TaperSpec",
+    "ThreadSpec",
     "TurningSpec",
     "build_part_mesh",
     "build_part_outline",

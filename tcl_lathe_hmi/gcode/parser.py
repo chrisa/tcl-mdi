@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
-from .actions import CanonicalAction, MoveAction, SpindleAction, ToolChangeAction
+from .actions import (
+    CanonicalAction,
+    DwellAction,
+    MoveAction,
+    SpindleAction,
+    ThreadSyncAction,
+    ToolChangeAction,
+)
 
 
 WORD_RE = re.compile(r"([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
 PAREN_COMMENT_RE = re.compile(r"\([^)]*\)")
+Dialect = Literal["hmi", "tcl_old", "auto"]
 
 
 class GCodeParseError(ValueError):
@@ -41,7 +50,10 @@ def parse_gcode(
     *,
     start_x_mm: float = 0.0,
     start_z_mm: float = 0.0,
+    dialect: Dialect = "auto",
 ) -> ParseResult:
+    if dialect not in {"hmi", "tcl_old", "auto"}:
+        raise ValueError(f"unknown G-code dialect: {dialect}")
     state = _ParserState(x_mm=start_x_mm, z_mm=start_z_mm)
     actions: list[CanonicalAction] = []
 
@@ -55,13 +67,21 @@ def parse_gcode(
             continue
 
         letters = {letter for letter, _value in words}
-        for letter, value in words:
-            if letter == "G":
-                _handle_g(line_number, value, state)
+        g_codes = [int(value) for letter, value in words if letter == "G"]
+        special_g_codes = [code for code in g_codes if code in {4, 33}]
+        if len(special_g_codes) > 1:
+            raise GCodeParseError(line_number, "multiple special G-codes on one line")
 
         for letter, value in words:
-            if letter == "F":
-                state.feed = value
+            if letter == "G":
+                code = int(value)
+                if code in {4, 33}:
+                    continue
+                _handle_g(line_number, code, state, dialect)
+
+        for letter, value in words:
+            if letter == "F" and not special_g_codes:
+                state.feed = value * state.units_per_program_unit
             elif letter == "S":
                 state.spindle_rpm = max(0.0, value)
             elif letter == "T":
@@ -73,7 +93,13 @@ def parse_gcode(
                 if action is not None:
                     actions.append(action)
 
-        if "X" in letters or "Z" in letters:
+        if special_g_codes:
+            special_code = special_g_codes[0]
+            if special_code == 4:
+                actions.append(_dwell_action(line_number, words, raw_line))
+            else:
+                actions.append(_thread_sync_action(line_number, words, state, raw_line))
+        elif "X" in letters or "Z" in letters:
             start_x = state.x_mm
             start_z = state.z_mm
             target_x = _target_for_axis(words, "X", state.x_mm, state)
@@ -146,8 +172,7 @@ def _words(line_number: int, line: str) -> list[tuple[str, float]]:
     return words
 
 
-def _handle_g(line_number: int, value: float, state: _ParserState) -> None:
-    code = int(value)
+def _handle_g(line_number: int, code: int, state: _ParserState, dialect: Dialect) -> None:
     if code == 0:
         state.motion_mode = "rapid"
     elif code == 1:
@@ -162,12 +187,59 @@ def _handle_g(line_number: int, value: float, state: _ParserState) -> None:
         state.units_per_program_unit = 25.4
     elif code == 21:
         state.units_per_program_unit = 1.0
+    elif code == 70 and dialect == "tcl_old":
+        state.units_per_program_unit = 25.4
+    elif code == 71 and dialect == "tcl_old":
+        state.units_per_program_unit = 1.0
     elif code == 90:
         state.absolute = True
     elif code == 91:
         state.absolute = False
+    elif code in {94, 97}:
+        return
     else:
         raise GCodeParseError(line_number, f"unsupported G-code: G{code}")
+
+
+def _dwell_action(
+    line_number: int,
+    words: list[tuple[str, float]],
+    raw_line: str,
+) -> DwellAction:
+    seconds = _word_value(words, "F")
+    if seconds is None:
+        raise GCodeParseError(line_number, "G04 requires F delay seconds")
+    if seconds < 0.0:
+        raise GCodeParseError(line_number, "G04 delay cannot be negative")
+    return DwellAction(line_number=line_number, seconds=seconds, source=raw_line)
+
+
+def _thread_sync_action(
+    line_number: int,
+    words: list[tuple[str, float]],
+    state: _ParserState,
+    raw_line: str,
+) -> ThreadSyncAction:
+    if _word_value(words, "X") is not None:
+        raise GCodeParseError(line_number, "G33 supports Z-only synchronized moves")
+    if _word_value(words, "Z") is None:
+        raise GCodeParseError(line_number, "G33 requires Z target")
+    pitch = _word_value(words, "K")
+    if pitch is None:
+        pitch = _word_value(words, "F")
+    if pitch is None:
+        raise GCodeParseError(line_number, "G33 requires K pitch")
+    pitch_mm = pitch * state.units_per_program_unit
+    if pitch_mm <= 0.0:
+        raise GCodeParseError(line_number, "G33 pitch must be positive")
+    target_z = _target_for_axis(words, "Z", state.z_mm, state)
+    state.z_mm = target_z
+    return ThreadSyncAction(
+        line_number=line_number,
+        target_z_mm=target_z,
+        pitch_mm=pitch_mm,
+        source=raw_line,
+    )
 
 
 def _handle_m(
@@ -218,6 +290,14 @@ def _target_for_axis(
                 return axis_mm
             return current_mm + axis_mm
     return current_mm
+
+
+def _word_value(words: list[tuple[str, float]], letter: str) -> float | None:
+    value = None
+    for found, found_value in words:
+        if found == letter:
+            value = found_value
+    return value
 
 
 def _linearized_arc_points(

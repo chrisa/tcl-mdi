@@ -3,9 +3,11 @@ from __future__ import annotations
 import pytest
 
 from tcl_lathe_hmi.gcode import (
+    DwellAction,
     GCodeParseError,
     MoveAction,
     SpindleAction,
+    ThreadSyncAction,
     ToolChangeAction,
     build_preview,
     parse_gcode,
@@ -74,8 +76,64 @@ def test_parse_legacy_t_word_tool_change():
 
 
 def test_parse_rejects_unsupported_gcode_before_execution():
-    with pytest.raises(GCodeParseError, match="unsupported G-code"):
+    with pytest.raises(GCodeParseError, match="G04 requires F"):
         parse_gcode("G4 X1 Z1 I0 K1")
+
+
+def test_parse_dwell_action_from_g04_f_seconds():
+    result = parse_gcode("G04 F1.25")
+    action = result.actions[0]
+
+    assert isinstance(action, DwellAction)
+    assert action.seconds == pytest.approx(1.25)
+
+
+def test_rejects_old_host_canned_cycles():
+    with pytest.raises(GCodeParseError, match="unsupported G-code: G81"):
+        parse_gcode("G81 X2 Z20 I4 F80")
+
+
+def test_parse_g33_thread_sync_action():
+    result = parse_gcode("G21 G90\nG0 X16 Z0\nG33 Z-20 K1.5")
+
+    assert len(result.actions) == 2
+    action = result.actions[1]
+    assert isinstance(action, ThreadSyncAction)
+    assert action.target_z_mm == pytest.approx(-20.0)
+    assert action.pitch_mm == pytest.approx(1.5)
+    assert result.final_x_mm == pytest.approx(16.0)
+    assert result.final_z_mm == pytest.approx(-20.0)
+
+
+def test_parse_g33_supports_incremental_and_inches():
+    result = parse_gcode("G20 G91\nG33 Z-0.5 K0.05", start_z_mm=2.0)
+    action = result.actions[0]
+
+    assert isinstance(action, ThreadSyncAction)
+    assert action.target_z_mm == pytest.approx(2.0 - 12.7)
+    assert action.pitch_mm == pytest.approx(1.27)
+
+
+def test_parse_g33_requires_z_and_pitch():
+    with pytest.raises(GCodeParseError, match="G33 requires Z target"):
+        parse_gcode("G33 K1.5")
+    with pytest.raises(GCodeParseError, match="G33 requires K pitch"):
+        parse_gcode("G33 Z-20")
+    with pytest.raises(GCodeParseError, match="Z-only"):
+        parse_gcode("G33 X12 Z-20 K1.5")
+
+
+def test_old_g70_g71_are_unit_aliases_only_in_old_dialect():
+    result = parse_gcode("G70 G91 G1 X0.1\nG71 G1 X1.0", dialect="tcl_old")
+
+    first, second = result.actions
+    assert isinstance(first, MoveAction)
+    assert first.target_x_mm == pytest.approx(2.54)
+    assert isinstance(second, MoveAction)
+    assert second.target_x_mm == pytest.approx(3.54)
+
+    with pytest.raises(GCodeParseError, match="unsupported G-code: G70"):
+        parse_gcode("G70", dialect="auto")
 
 
 def test_parse_linearizes_xz_arc_moves():

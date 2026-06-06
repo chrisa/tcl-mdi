@@ -18,10 +18,10 @@ class StockSpec:
 
 @dataclass(frozen=True)
 class TurningSpec:
-    enabled: bool = True
-    face: bool = True
-    rough: bool = True
-    finish: bool = True
+    enabled: bool = False
+    face: bool = False
+    rough: bool = False
+    finish: bool = False
     target_diameter_mm: float = 16.0
     target_length_mm: float = 60.0
     stock_to_leave_mm: float = 0.5
@@ -46,9 +46,9 @@ class TaperSpec:
 
 @dataclass(frozen=True)
 class HoleSpec:
-    center_drill: bool = True
-    drill: bool = True
-    bore: bool = True
+    center_drill: bool = False
+    drill: bool = False
+    bore: bool = False
     center_depth_mm: float = 2.0
     drill_diameter_mm: float = 6.0
     drill_depth_mm: float = 30.0
@@ -67,12 +67,71 @@ class HoleSpec:
     boring_station: int | None = 4
 
 
+@dataclass(frozen=True, init=False)
+class ThreadSpec:
+    external: bool = False
+    internal: bool = False
+    taper: bool = False
+    major_diameter_mm: float = 16.0
+    pitch_mm: float = 1.0
+    length_mm: float = 20.0
+    depth_mm: float = 1.23
+    passes: int = 10
+    spring_passes: int = 1
+    start_z_mm: float = 0.0
+    clearance_mm: float = 3.0
+    spindle_rpm: float = 300.0
+    tool_number: int = 6
+    station: int | None = 6
+
+    def __init__(
+        self,
+        external: bool = False,
+        internal: bool = False,
+        taper: bool = False,
+        major_diameter_mm: float = 16.0,
+        pitch_mm: float = 1.0,
+        length_mm: float = 20.0,
+        depth_mm: float = 1.23,
+        passes: int = 10,
+        spring_passes: int = 1,
+        start_z_mm: float = 0.0,
+        clearance_mm: float = 3.0,
+        spindle_rpm: float = 300.0,
+        tool_number: int = 6,
+        station: int | None = 6,
+        *,
+        enabled: bool | None = None,
+    ):
+        if enabled is not None:
+            external = external or enabled
+        object.__setattr__(self, "external", external)
+        object.__setattr__(self, "internal", internal)
+        object.__setattr__(self, "taper", taper)
+        object.__setattr__(self, "major_diameter_mm", major_diameter_mm)
+        object.__setattr__(self, "pitch_mm", pitch_mm)
+        object.__setattr__(self, "length_mm", length_mm)
+        object.__setattr__(self, "depth_mm", depth_mm)
+        object.__setattr__(self, "passes", passes)
+        object.__setattr__(self, "spring_passes", spring_passes)
+        object.__setattr__(self, "start_z_mm", start_z_mm)
+        object.__setattr__(self, "clearance_mm", clearance_mm)
+        object.__setattr__(self, "spindle_rpm", spindle_rpm)
+        object.__setattr__(self, "tool_number", tool_number)
+        object.__setattr__(self, "station", station)
+
+    @property
+    def enabled(self) -> bool:
+        return self.external or self.internal or self.taper
+
+
 @dataclass(frozen=True)
 class LatheCamJob:
     stock: StockSpec = field(default_factory=StockSpec)
     turning: TurningSpec = field(default_factory=TurningSpec)
     taper: TaperSpec = field(default_factory=TaperSpec)
     hole: HoleSpec = field(default_factory=HoleSpec)
+    thread: ThreadSpec = field(default_factory=ThreadSpec)
 
     def validate(self) -> None:
         _positive(self.stock.diameter_mm, "stock diameter")
@@ -133,12 +192,42 @@ class LatheCamJob:
         if max_hole_depth > self.stock.length_mm:
             raise CamValidationError("hole depth cannot exceed stock length")
 
+        if self.thread.internal:
+            raise CamValidationError("internal threading is not available yet")
+        if self.thread.taper:
+            raise CamValidationError("taper threading is not available yet")
+
+        if self.thread.enabled:
+            _positive(self.thread.major_diameter_mm, "thread major diameter")
+            _positive(self.thread.pitch_mm, "thread pitch")
+            _positive(self.thread.length_mm, "thread length")
+            _positive(self.thread.depth_mm, "thread depth")
+            _positive(self.thread.clearance_mm, "thread clearance")
+            _positive(self.thread.spindle_rpm, "thread spindle RPM")
+            _valid_tool(self.thread.tool_number, self.thread.station, "thread")
+            if self.thread.passes <= 0:
+                raise CamValidationError("thread passes must be positive")
+            if self.thread.spring_passes < 0:
+                raise CamValidationError("thread spring passes cannot be negative")
+            if self.thread.major_diameter_mm > self.stock.diameter_mm:
+                raise CamValidationError("thread major diameter cannot exceed stock diameter")
+            if self.thread.depth_mm >= self.thread.major_diameter_mm:
+                raise CamValidationError("thread depth must be smaller than major diameter")
+            thread_end_z = self.thread.start_z_mm - self.thread.length_mm
+            stock_back = self.stock.z_front_mm - self.stock.length_mm
+            if not (stock_back <= thread_end_z <= self.thread.start_z_mm <= self.stock.z_front_mm):
+                raise CamValidationError("thread Z range must sit inside the stock length")
+
 
 def finished_profile_points(job: LatheCamJob) -> list[tuple[float, float]]:
     """Return closed finished profile points as display diameter X and Z."""
     front = job.stock.z_front_mm
-    back = front - job.turning.target_length_mm
-    base_diameter = job.turning.target_diameter_mm
+    if job.turning.enabled or job.taper.enabled:
+        back = front - job.turning.target_length_mm
+        base_diameter = job.turning.target_diameter_mm
+    else:
+        back = front - job.stock.length_mm
+        base_diameter = job.stock.diameter_mm
     surface: list[tuple[float, float]] = [(base_diameter, front)]
 
     if job.taper.enabled:

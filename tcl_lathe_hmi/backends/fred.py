@@ -40,6 +40,7 @@ class FredBackend:
         self._pending_snapshot_generation: int | None = None
         self._pending_tool_dwell_s = 0.0
         self._pending_tool_complete_at: float | None = None
+        self._pending_dwell_complete_at: float | None = None
         self._latest_snapshot_generation: int | None = None
 
     def connect(self) -> None:
@@ -233,6 +234,51 @@ class FredBackend:
         )
         return bool(command_active)
 
+    def thread_sync_move(
+        self,
+        *,
+        z_mm: float,
+        pitch: float,
+        slew: int = 61,
+    ) -> None:
+        client = self._require_ready()
+        thread_sync_move = getattr(client, "thread_sync_move", None)
+        if thread_sync_move is None:
+            thread_sync_move = getattr(client, "g33_move", None)
+        if thread_sync_move is None:
+            raise CommandRejectedError("fred: thread sync requires FredClient.thread_sync_move")
+        if pitch <= 0.0:
+            raise CommandRejectedError("fred: thread pitch must be positive")
+
+        target = (self._state.x_mm, self._state.z_mm + z_mm)
+        baseline_generation = self._latest_snapshot_generation
+        try:
+            command_active = thread_sync_move(
+                z=z_mm,
+                pitch=pitch,
+                slew=slew,
+                wait=False,
+            )
+        except Exception as exc:
+            raise BackendError(f"fred: thread sync command failed: {exc}") from exc
+
+        if command_active:
+            self._set_pending_motion_completion(target, baseline_generation)
+        self._state = replace(
+            self._state,
+            busy=bool(command_active),
+            status_message="fred: thread sync move queued",
+        )
+
+    def dwell(self, *, seconds: float) -> None:
+        self._require_ready()
+        self._set_pending_dwell_completion(max(0.0, seconds))
+        self._state = replace(
+            self._state,
+            busy=True,
+            status_message=f"fred: dwell {max(0.0, seconds):0.3f}s queued",
+        )
+
     def wait_idle(self, timeout_ms: int | None = None) -> None:
         deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000.0
 
@@ -269,19 +315,34 @@ class FredBackend:
         self._pending_completion = "motion"
         self._pending_motion_target_mm = target_mm
         self._pending_snapshot_generation = baseline_generation
+        self._pending_tool_dwell_s = 0.0
+        self._pending_tool_complete_at = None
+        self._pending_dwell_complete_at = None
 
     def _set_pending_spindle_completion(self, baseline_generation: int | None) -> None:
         self._pending_completion = "spindle"
         self._pending_motion_target_mm = None
         self._pending_snapshot_generation = baseline_generation
+        self._pending_tool_dwell_s = 0.0
+        self._pending_tool_complete_at = None
+        self._pending_dwell_complete_at = None
 
     def _set_pending_tool_completion(self, station_count: int) -> None:
         self._pending_completion = "tool"
         self._pending_motion_target_mm = None
         self._pending_snapshot_generation = None
+        self._pending_dwell_complete_at = None
         dwell_per_station = max(0.0, self.config.fred_tool_station_dwell_s)
         self._pending_tool_dwell_s = dwell_per_station * station_count
         self._pending_tool_complete_at = None
+
+    def _set_pending_dwell_completion(self, seconds: float) -> None:
+        self._pending_completion = "dwell"
+        self._pending_motion_target_mm = None
+        self._pending_snapshot_generation = None
+        self._pending_tool_dwell_s = 0.0
+        self._pending_tool_complete_at = None
+        self._pending_dwell_complete_at = time.monotonic() + seconds
 
     def _clear_pending_completion(self) -> None:
         self._pending_completion = None
@@ -289,6 +350,7 @@ class FredBackend:
         self._pending_snapshot_generation = None
         self._pending_tool_dwell_s = 0.0
         self._pending_tool_complete_at = None
+        self._pending_dwell_complete_at = None
 
     def _pending_completion_status(
         self,
@@ -333,6 +395,13 @@ class FredBackend:
                 return True, "fred: toolchanger settling"
             self._clear_pending_completion()
             return False, None
+
+        if self._pending_completion == "dwell":
+            complete_at = self._pending_dwell_complete_at
+            if complete_at is None or time.monotonic() >= complete_at:
+                self._clear_pending_completion()
+                return False, None
+            return True, "fred: dwell active"
 
         self._clear_pending_completion()
         return False, None

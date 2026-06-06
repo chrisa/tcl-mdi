@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .actions import CanonicalAction, MoveAction
+from .actions import CanonicalAction, MoveAction, ThreadSyncAction
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,20 @@ def build_preview(
     zs = [z]
 
     for action in actions:
+        if isinstance(action, ThreadSyncAction):
+            segment = PreviewSegment(
+                start_x_mm=x,
+                start_z_mm=z,
+                end_x_mm=x,
+                end_z_mm=action.target_z_mm,
+                mode="thread",
+                line_number=action.line_number,
+            )
+            segments.append(segment)
+            z = action.target_z_mm
+            xs.extend([segment.start_x_mm, segment.end_x_mm])
+            zs.extend([segment.start_z_mm, segment.end_z_mm])
+            continue
         if not isinstance(action, MoveAction):
             continue
         segment = PreviewSegment(

@@ -217,7 +217,8 @@ Canonical actions:
 - `MoveAction`: rapid/feed linear move.
 - `SpindleAction`: start, reverse, stop, set speed.
 - `ToolChangeAction`: request logical tool and optional turret station.
-- `DwellAction`: future.
+- `DwellAction`: timed dwell.
+- `ThreadSyncAction`: G33-style spindle-synchronised Z pass.
 - `MessageAction`: operator prompt or unsupported-code note.
 
 Execution policy:

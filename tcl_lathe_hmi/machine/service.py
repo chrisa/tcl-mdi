@@ -7,9 +7,11 @@ from pathlib import Path
 from tcl_lathe_hmi.config import MachineConfig
 from tcl_lathe_hmi.gcode import (
     CanonicalAction,
+    DwellAction,
     MessageAction,
     MoveAction,
     SpindleAction,
+    ThreadSyncAction,
     ToolChangeAction,
 )
 from tcl_lathe_hmi.tools import ToolRecord, ToolTable, sample_tool_table
@@ -178,6 +180,13 @@ class MachineService:
             return self.set_spindle(on=action.on, rpm=action.rpm, forward=action.forward)
         if isinstance(action, ToolChangeAction):
             return self.request_tool_change(action)
+        if isinstance(action, DwellAction):
+            return self._execute_dwell_action(action)
+        if isinstance(action, ThreadSyncAction):
+            return self._execute_thread_sync_action(
+                action,
+                default_slew=default_slew,
+            )
         if isinstance(action, MessageAction):
             self._mark_rejected(action.message)
             return False
@@ -216,6 +225,64 @@ class MachineService:
             feed=int(action.feed or default_feed),
             slew=default_slew,
         )
+
+    def _execute_dwell_action(self, action: DwellAction) -> bool:
+        if not self.state.can_accept_commands:
+            self._mark_rejected("Machine is not ready for dwell")
+            return False
+        try:
+            self.backend.dwell(seconds=action.seconds)
+            self.state = self._merge_tool_state(self.backend.poll())
+            return True
+        except CommandRejectedError as exc:
+            self._mark_rejected(str(exc))
+            return False
+        except BackendError as exc:
+            self._mark_error(str(exc))
+            return False
+
+    def _execute_thread_sync_action(
+        self,
+        action: ThreadSyncAction,
+        *,
+        default_slew: int,
+    ) -> bool:
+        if not self.state.can_accept_commands:
+            self._mark_rejected("Machine is not ready for thread sync move")
+            return False
+
+        dz = action.target_z_mm - self.state.work_z_mm
+        target_machine_z = self.state.z_mm + dz
+        limit_error = self._limits_error_for_target(
+            self.state.x_mm,
+            target_machine_z,
+            f"Line {action.line_number}",
+        )
+        if limit_error is not None:
+            self._mark_rejected(limit_error)
+            return False
+
+        if dz == 0.0:
+            self.state = replace(
+                self.state,
+                status_message=f"Line {action.line_number}: already at thread target",
+            )
+            return True
+
+        try:
+            self.backend.thread_sync_move(
+                z_mm=dz,
+                pitch=action.pitch_mm,
+                slew=default_slew,
+            )
+            self.state = self._merge_tool_state(self.backend.poll())
+            return True
+        except CommandRejectedError as exc:
+            self._mark_rejected(str(exc))
+            return False
+        except BackendError as exc:
+            self._mark_error(str(exc))
+            return False
 
     def request_tool_change(self, action: ToolChangeAction) -> bool:
         tool_number = action.tool_number

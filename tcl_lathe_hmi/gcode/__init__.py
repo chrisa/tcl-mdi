@@ -1,8 +1,10 @@
 from .actions import (
     CanonicalAction,
+    DwellAction,
     MessageAction,
     MoveAction,
     SpindleAction,
+    ThreadSyncAction,
     ToolChangeAction,
 )
 from .lexer import LinuxCncGCodeLexer, TclGCodeStyle
@@ -11,6 +13,7 @@ from .preview import PreviewPath, PreviewSegment, build_preview
 
 __all__ = [
     "CanonicalAction",
+    "DwellAction",
     "GCodeParseError",
     "LinuxCncGCodeLexer",
     "MessageAction",
@@ -20,6 +23,7 @@ __all__ = [
     "PreviewSegment",
     "SpindleAction",
     "TclGCodeStyle",
+    "ThreadSyncAction",
     "ToolChangeAction",
     "build_preview",
     "parse_gcode",

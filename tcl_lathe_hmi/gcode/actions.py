@@ -32,10 +32,32 @@ class ToolChangeAction:
 
 
 @dataclass(frozen=True)
+class DwellAction:
+    line_number: int
+    seconds: float
+    source: str = ""
+
+
+@dataclass(frozen=True)
 class MessageAction:
     line_number: int
     message: str
     source: str = ""
 
 
-CanonicalAction = MoveAction | SpindleAction | ToolChangeAction | MessageAction
+@dataclass(frozen=True)
+class ThreadSyncAction:
+    line_number: int
+    target_z_mm: float
+    pitch_mm: float
+    source: str = ""
+
+
+CanonicalAction = (
+    MoveAction
+    | SpindleAction
+    | ToolChangeAction
+    | DwellAction
+    | MessageAction
+    | ThreadSyncAction
+)

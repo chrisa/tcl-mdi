@@ -58,5 +58,17 @@ class MachineBackend(Protocol):
     ) -> bool:
         ...
 
+    def thread_sync_move(
+        self,
+        *,
+        z_mm: float,
+        pitch: float,
+        slew: int = 61,
+    ) -> None:
+        ...
+
+    def dwell(self, *, seconds: float) -> None:
+        ...
+
     def wait_idle(self, timeout_ms: int | None = None) -> None:
         ...

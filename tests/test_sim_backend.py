@@ -62,3 +62,21 @@ def test_sim_backend_toolchanger_busy_for_station_change():
 
     assert not backend.select_tool(current_station=4, target_station=4, slew=61)
     assert not backend.poll().busy
+
+
+def test_sim_backend_thread_sync_move_updates_z_after_idle():
+    config = MachineConfig(sim_motion_time_s=0.01)
+    backend = SimBackend(config)
+    backend.connect()
+    backend.jog_delta(x_mm=22.0, z_mm=2.0, mode="rapid")
+    backend.wait_idle(timeout_ms=500)
+
+    backend.thread_sync_move(z_mm=-20.0, pitch=1.5)
+    assert backend.poll().busy
+
+    backend.wait_idle(timeout_ms=500)
+    state = backend.poll()
+
+    assert not state.busy
+    assert state.x_mm == 22.0
+    assert state.z_mm == -18.0

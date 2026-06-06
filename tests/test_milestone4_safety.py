@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tcl_lathe_hmi.backends.sim import SimBackend
 from tcl_lathe_hmi.config import MachineConfig
-from tcl_lathe_hmi.gcode import MoveAction
+from tcl_lathe_hmi.gcode import MoveAction, ThreadSyncAction
 from tcl_lathe_hmi.machine import MachineService
 from tcl_lathe_hmi.tools import ToolRecord
 
@@ -31,6 +31,27 @@ def test_program_move_is_blocked_by_soft_limits():
 
     assert not service.execute_action(action)
     assert "Line 12" in service.state.status_message
+    assert "outside soft limits" in service.state.status_message
+
+
+def test_thread_sync_move_is_blocked_by_soft_limits():
+    service = MachineService(
+        SimBackend(MachineConfig()),
+        config=MachineConfig(z_min_limit_mm=-1.0, z_max_limit_mm=5.0),
+    )
+    service.connect()
+    assert service.jog_delta(x_mm=0.0, z_mm=2.0, mode="rapid")
+    service.backend.wait_idle(timeout_ms=500)
+    service.poll()
+
+    action = ThreadSyncAction(
+        line_number=14,
+        target_z_mm=-2.0,
+        pitch_mm=1.5,
+    )
+
+    assert not service.execute_action(action)
+    assert "Line 14" in service.state.status_message
     assert "outside soft limits" in service.state.status_message
 
 

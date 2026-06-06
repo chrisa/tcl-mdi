@@ -27,6 +27,7 @@ from tcl_lathe_hmi.cam import (
     LatheCamJob,
     StockSpec,
     TaperSpec,
+    ThreadSpec,
     TurningSpec,
     build_part_mesh,
     build_part_outline,
@@ -61,6 +62,8 @@ BLUE = (0.16, 0.36, 0.62, 1)
 AMBER = (0.78, 0.52, 0.14, 1)
 RED = (0.64, 0.18, 0.18, 1)
 BUTTON = (0.24, 0.25, 0.27, 1)
+THREAD = (0.20, 0.70, 0.86, 1)
+THREAD_TOOLPATH = (0.95, 0.42, 0.30, 0.72)
 
 
 class TclLatheHmiApp(App):
@@ -1336,15 +1339,19 @@ class ProgramPanel(BoxLayout):
         self.program_status.color = TEXT
 
     def _preview_limit_error(self, actions: list[CanonicalAction]) -> str | None:
-        for action in actions:
-            if isinstance(action, MoveAction):
-                error = self.service.limits_error_for_work_target(
-                    action.target_x_mm,
-                    action.target_z_mm,
-                    f"Preview line {action.line_number}",
-                )
-                if error is not None:
-                    return error
+        preview = build_preview(
+            actions,
+            start_x_mm=self.service.state.work_x_mm,
+            start_z_mm=self.service.state.work_z_mm,
+        )
+        for segment in preview.segments:
+            error = self.service.limits_error_for_work_target(
+                segment.end_x_mm,
+                segment.end_z_mm,
+                f"Preview line {segment.line_number}",
+            )
+            if error is not None:
+                return error
         return None
 
     def _tool_offset_warning(self, actions: list[CanonicalAction]) -> str:
@@ -1383,13 +1390,16 @@ class CamPanel(BoxLayout):
         self.service = service
         self.on_program_ready = on_program_ready
         self.generated_gcode = ""
-        self.face_enabled = True
-        self.rough_enabled = True
-        self.finish_enabled = True
+        self.face_enabled = False
+        self.rough_enabled = False
+        self.finish_enabled = False
         self.taper_enabled = False
-        self.center_enabled = True
-        self.drill_enabled = True
-        self.bore_enabled = True
+        self.center_enabled = False
+        self.drill_enabled = False
+        self.bore_enabled = False
+        self.thread_external_enabled = False
+        self.thread_internal_enabled = False
+        self.thread_taper_enabled = False
 
         paint(self, PANEL)
         self._build()
@@ -1478,8 +1488,6 @@ class CamPanel(BoxLayout):
             configure_touch_release(button, recover_stuck=False)
             if name == "turning":
                 button.state = "down"
-            if name == "thread":
-                button.disabled = True
             bind_release(button, lambda btn, tab=name: self._show_cam_tab(tab))
             button.bind(state=lambda btn, _state: self._style_tab(btn))
             self._style_tab(button)
@@ -1575,13 +1583,41 @@ class CamPanel(BoxLayout):
     def _build_thread_tab(self) -> BoxLayout:
         tab = BoxLayout(orientation="vertical", spacing=8)
         paint(tab, PANEL)
-        tab.add_widget(section_label("Threading"))
-        placeholder = Label(
-            text="Reserved for threading cycles",
-            color=MUTED,
-            font_size=22,
-        )
-        tab.add_widget(placeholder)
+
+        flag_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=52)
+        flag_row.add_widget(self._flag_button("External", "thread_external_enabled"))
+        internal = self._flag_button("Internal", "thread_internal_enabled")
+        internal.disabled = True
+        internal.color = MUTED
+        taper = self._flag_button("Taper", "thread_taper_enabled")
+        taper.disabled = True
+        taper.color = MUTED
+        flag_row.add_widget(internal)
+        flag_row.add_widget(taper)
+        tab.add_widget(flag_row)
+
+        thread_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=230)
+        self.thread_major_input = self._cam_field("16.0", title_text="Thread Major Diameter")
+        self.thread_pitch_input = self._cam_field("1.0", title_text="Thread Pitch")
+        self.thread_length_input = self._cam_field("20.0", title_text="Thread Length")
+        self.thread_depth_input = self._cam_field("1.23", title_text="Thread Depth On Diameter")
+        self.thread_passes_input = self._cam_field("10", integer=True, title_text="Thread Passes")
+        self.thread_spring_input = self._cam_field("1", integer=True, title_text="Spring Passes")
+        self.thread_start_z_input = self._cam_field("0.0", title_text="Thread Start Z")
+        self.thread_clearance_input = self._cam_field("3.0", title_text="Thread Clearance")
+        self.thread_rpm_input = self._cam_field("300", title_text="Thread RPM")
+        self.thread_tool_input = self._cam_field("6", integer=True, title_text="Thread Tool")
+        self._add_labeled(thread_grid, "Major", self.thread_major_input)
+        self._add_labeled(thread_grid, "Pitch", self.thread_pitch_input)
+        self._add_labeled(thread_grid, "Length", self.thread_length_input)
+        self._add_labeled(thread_grid, "Depth", self.thread_depth_input)
+        self._add_labeled(thread_grid, "Passes", self.thread_passes_input)
+        self._add_labeled(thread_grid, "Spring", self.thread_spring_input)
+        self._add_labeled(thread_grid, "Start Z", self.thread_start_z_input)
+        self._add_labeled(thread_grid, "Clear", self.thread_clearance_input)
+        self._add_labeled(thread_grid, "RPM", self.thread_rpm_input)
+        self._add_labeled(thread_grid, "Tool", self.thread_tool_input)
+        tab.add_widget(thread_grid)
         return tab
 
     def refresh(self, state: MachineState) -> None:
@@ -1606,11 +1642,11 @@ class CamPanel(BoxLayout):
         grid.add_widget(widget)
 
     def _show_cam_tab(self, tab_name: str) -> None:
-        if tab_name == "thread":
-            return
         self.cam_tab_container.clear_widgets()
         if tab_name == "hole":
             self.cam_tab_container.add_widget(self.hole_panel)
+        elif tab_name == "thread":
+            self.cam_tab_container.add_widget(self.thread_panel)
         else:
             self.cam_tab_container.add_widget(self.turning_panel)
 
@@ -1720,6 +1756,7 @@ class CamPanel(BoxLayout):
     def _job_from_fields(self) -> LatheCamJob:
         turning_tool = int(parse_number(self.turn_tool_input.text, 1))
         boring_tool = int(parse_number(self.boring_tool_input.text, 4))
+        thread_tool = int(parse_number(self.thread_tool_input.text, 6))
         return LatheCamJob(
             stock=StockSpec(
                 diameter_mm=parse_number(self.stock_diameter_input.text, 20.0),
@@ -1728,7 +1765,7 @@ class CamPanel(BoxLayout):
                 clearance_mm=parse_number(self.clearance_input.text, 3.0),
             ),
             turning=TurningSpec(
-                enabled=True,
+                enabled=self.face_enabled or self.rough_enabled or self.finish_enabled or self.taper_enabled,
                 face=self.face_enabled,
                 rough=self.rough_enabled,
                 finish=self.finish_enabled,
@@ -1764,18 +1801,38 @@ class CamPanel(BoxLayout):
                 boring_tool_number=boring_tool,
                 boring_station=boring_tool,
             ),
+            thread=ThreadSpec(
+                external=self.thread_external_enabled,
+                internal=self.thread_internal_enabled,
+                taper=self.thread_taper_enabled,
+                major_diameter_mm=parse_number(self.thread_major_input.text, 16.0),
+                pitch_mm=parse_number(self.thread_pitch_input.text, 1.0),
+                length_mm=parse_number(self.thread_length_input.text, 20.0),
+                depth_mm=parse_number(self.thread_depth_input.text, 1.23),
+                passes=int(parse_number(self.thread_passes_input.text, 10)),
+                spring_passes=int(parse_number(self.thread_spring_input.text, 1)),
+                start_z_mm=parse_number(self.thread_start_z_input.text, 0.0),
+                clearance_mm=parse_number(self.thread_clearance_input.text, 3.0),
+                spindle_rpm=parse_number(self.thread_rpm_input.text, 300.0),
+                tool_number=thread_tool,
+                station=thread_tool,
+            ),
         )
 
     def _preview_limit_error(self, actions: list[CanonicalAction]) -> str | None:
-        for action in actions:
-            if isinstance(action, MoveAction):
-                error = self.service.limits_error_for_work_target(
-                    action.target_x_mm,
-                    action.target_z_mm,
-                    f"CAM preview line {action.line_number}",
-                )
-                if error is not None:
-                    return error
+        preview = build_preview(
+            actions,
+            start_x_mm=self.service.state.work_x_mm,
+            start_z_mm=self.service.state.work_z_mm,
+        )
+        for segment in preview.segments:
+            error = self.service.limits_error_for_work_target(
+                segment.end_x_mm,
+                segment.end_z_mm,
+                f"CAM preview line {segment.line_number}",
+            )
+            if error is not None:
+                return error
         return None
 
     def _set_status(self, message: str, color) -> None:
@@ -2349,6 +2406,7 @@ class PartIsoCanvas(Widget):
                 )
 
             self._draw_reference_edges(projected, vertices)
+            self._draw_thread_overlay(projected)
 
     @staticmethod
     def _project(vertex) -> tuple[float, float, float]:
@@ -2407,6 +2465,74 @@ class PartIsoCanvas(Widget):
                 screen_x, screen_y = self._screen_from_projected(px, py, projected)
                 points.extend([screen_x, screen_y])
             Color(0.70, 0.78, 0.83, 0.92)
+            Line(points=points, width=width)
+
+    def _draw_thread_overlay(self, projected) -> None:
+        if self.job is None or not self.job.thread.external:
+            return
+        thread = self.job.thread
+        if thread.pitch_mm <= 0.0 or thread.length_mm <= 0.0 or thread.major_diameter_mm <= 0.0:
+            return
+
+        major_radius = thread.major_diameter_mm / 2.0
+        minor_radius = max(0.0, (thread.major_diameter_mm - thread.depth_mm) / 2.0)
+        if major_radius <= 0.0 or minor_radius <= 0.0 or minor_radius >= major_radius:
+            return
+
+        turns = max(1.0, thread.length_mm / thread.pitch_mm)
+        steps = max(24, min(720, math.ceil(turns * 28)))
+        Color(*THREAD)
+        self._draw_thread_helix(
+            thread.start_z_mm,
+            thread.length_mm,
+            thread.pitch_mm,
+            major_radius,
+            steps,
+            projected,
+            phase=0.0,
+            width=1.6,
+        )
+        Color(0.10, 0.38, 0.48, 0.78)
+        self._draw_thread_helix(
+            thread.start_z_mm - thread.pitch_mm / 2.0,
+            max(0.0, thread.length_mm - thread.pitch_mm / 2.0),
+            thread.pitch_mm,
+            minor_radius,
+            steps,
+            projected,
+            phase=math.pi,
+            width=1.0,
+        )
+
+    def _draw_thread_helix(
+        self,
+        start_z: float,
+        length: float,
+        pitch: float,
+        radius: float,
+        steps: int,
+        projected,
+        *,
+        phase: float,
+        width: float,
+    ) -> None:
+        if length <= 0.0 or pitch <= 0.0:
+            return
+        points: list[float] = []
+        for index in range(steps + 1):
+            fraction = index / steps
+            z_mm = start_z - length * fraction
+            angle = phase + math.tau * (length * fraction / pitch)
+            px, py, _depth = self._project(
+                (
+                    z_mm,
+                    radius * math.cos(angle),
+                    radius * math.sin(angle),
+                )
+            )
+            screen_x, screen_y = self._screen_from_projected(px, py, projected)
+            points.extend([screen_x, screen_y])
+        if len(points) >= 4:
             Line(points=points, width=width)
 
     def _ring_stations(self, vertices) -> dict[float, float]:
@@ -2566,20 +2692,36 @@ class PreviewCanvas(Widget):
                 Line(points=[self.x + pad, zero_x_y, self.x + self.width - pad, zero_x_y], width=1)
 
             for segment in self.part_outline:
-                Color(*(0.65, 0.48, 0.22, 1) if segment.mode == "hole" else (0.42, 0.55, 0.66, 1))
+                if segment.mode == "thread":
+                    Color(*THREAD)
+                    width = 1.8
+                elif segment.mode == "hole":
+                    Color(0.65, 0.48, 0.22, 1)
+                    width = 2.4
+                else:
+                    Color(0.42, 0.55, 0.66, 1)
+                    width = 2.4
                 x0, y0 = map_point(segment.start_x_mm, segment.start_z_mm)
                 x1, y1 = map_point(segment.end_x_mm, segment.end_z_mm)
-                Line(points=[x0, y0, x1, y1], width=2.4)
+                Line(points=[x0, y0, x1, y1], width=width)
 
             if self.preview_path is None:
                 self._draw_tool_marker(map_point)
                 return
 
             for segment in self.preview_path.segments:
-                Color(*(AMBER if segment.mode == "rapid" else GREEN))
+                if segment.mode == "thread":
+                    Color(*THREAD_TOOLPATH)
+                    width = 0.9
+                elif segment.mode == "rapid":
+                    Color(*AMBER)
+                    width = 0.8
+                else:
+                    Color(*GREEN)
+                    width = 1.1
                 x0, y0 = map_point(segment.start_x_mm, segment.start_z_mm)
                 x1, y1 = map_point(segment.end_x_mm, segment.end_z_mm)
-                Line(points=[x0, y0, x1, y1], width=2.0 if segment.mode == "feed" else 1.2)
+                Line(points=[x0, y0, x1, y1], width=width)
 
             self._draw_tool_marker(map_point)
 
@@ -2589,18 +2731,19 @@ class PreviewCanvas(Widget):
         tool_x, tool_y = map_point(self.tool_x_mm, self.tool_z_mm)
         size = max(8.0, min(16.0, min(self.width, self.height) * 0.035))
         Color(0.96, 0.88, 0.22, 1)
+        base_y = tool_y - size * 1.72
         Mesh(
             vertices=[
                 tool_x,
-                tool_y + size,
+                tool_y,
                 0,
                 0,
                 tool_x - size * 0.86,
-                tool_y - size * 0.72,
+                base_y,
                 0,
                 0,
                 tool_x + size * 0.86,
-                tool_y - size * 0.72,
+                base_y,
                 0,
                 0,
             ],
@@ -2611,13 +2754,13 @@ class PreviewCanvas(Widget):
         Line(
             points=[
                 tool_x,
-                tool_y + size,
+                tool_y,
                 tool_x - size * 0.86,
-                tool_y - size * 0.72,
+                base_y,
                 tool_x + size * 0.86,
-                tool_y - size * 0.72,
+                base_y,
                 tool_x,
-                tool_y + size,
+                tool_y,
             ],
             width=1.4,
         )

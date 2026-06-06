@@ -30,6 +30,9 @@ def generate_cam_program(job: LatheCamJob) -> GeneratedCamProgram:
     if job.turning.enabled and (job.turning.face or job.turning.rough or job.turning.finish):
         lines.extend(_turning_program(job))
 
+    if job.thread.enabled:
+        lines.extend(_thread_program(job))
+
     lines.extend(_hole_program(job))
     lines.extend(["M5", ""])
     return GeneratedCamProgram(
@@ -126,14 +129,22 @@ def _hole_program(job: LatheCamJob) -> list[str]:
     if job.hole.drill:
         lines.extend(
             [
-                "(Drill)",
+                "(Peck drill)",
                 _tool_change_line(job.hole.drill_tool_number, job.hole.drill_station),
                 f"S{_fmt(job.hole.spindle_rpm)} M3",
                 f"G0 X0 Z{_fmt(safe_z)}",
-                f"G1 Z{_fmt(front - job.hole.drill_depth_mm)} F{_fmt(job.hole.drill_feed)}",
-                f"G0 Z{_fmt(safe_z)}",
             ]
         )
+        depth = 0.0
+        peck_depth = max(0.1, job.hole.drill_diameter_mm)
+        while depth < job.hole.drill_depth_mm:
+            depth = min(job.hole.drill_depth_mm, depth + peck_depth)
+            lines.extend(
+                [
+                    f"G1 Z{_fmt(front - depth)} F{_fmt(job.hole.drill_feed)}",
+                    f"G0 Z{_fmt(safe_z)}",
+                ]
+            )
 
     if job.hole.bore:
         lines.extend(
@@ -160,6 +171,39 @@ def _hole_program(job: LatheCamJob) -> list[str]:
             )
 
     return lines
+
+
+def _thread_program(job: LatheCamJob) -> list[str]:
+    thread = job.thread
+    if not thread.external:
+        return []
+    start_z = thread.start_z_mm
+    end_z = start_z - thread.length_mm
+    retract_x = thread.major_diameter_mm + thread.clearance_mm * 2.0
+    lines = [
+        "(External thread)",
+        _tool_change_line(thread.tool_number, thread.station),
+        f"S{_fmt(thread.spindle_rpm)} M3",
+        f"G0 X{_fmt(retract_x)} Z{_fmt(start_z)}",
+    ]
+
+    for pass_depth in _thread_pass_depths(thread.depth_mm, thread.passes, thread.spring_passes):
+        pass_x = thread.major_diameter_mm - pass_depth
+        lines.extend(
+            [
+                f"G0 X{_fmt(pass_x)} Z{_fmt(start_z)}",
+                f"G33 Z{_fmt(end_z)} K{_fmt(thread.pitch_mm)}",
+                f"G0 X{_fmt(retract_x)}",
+                f"G0 Z{_fmt(start_z)}",
+            ]
+        )
+    return lines
+
+
+def _thread_pass_depths(depth_mm: float, passes: int, spring_passes: int) -> list[float]:
+    depths = [depth_mm * math.sqrt(index / passes) for index in range(1, passes + 1)]
+    depths.extend([depth_mm] * spring_passes)
+    return depths
 
 
 def _run_liblathe_op(
@@ -322,6 +366,65 @@ def build_part_outline(job: LatheCamJob) -> list[PreviewSegment]:
                 ),
             ]
         )
+    segments.extend(_thread_outline_segments(job))
+    return segments
+
+
+def _thread_outline_segments(job: LatheCamJob) -> list[PreviewSegment]:
+    thread = job.thread
+    if not thread.external:
+        return []
+    if (
+        thread.major_diameter_mm <= 0.0
+        or thread.pitch_mm <= 0.0
+        or thread.length_mm <= 0.0
+        or thread.depth_mm <= 0.0
+    ):
+        return []
+
+    major_diameter = thread.major_diameter_mm
+    minor_diameter = max(0.0, thread.major_diameter_mm - thread.depth_mm)
+    if minor_diameter >= major_diameter:
+        return []
+
+    start_z = thread.start_z_mm
+    end_z = start_z - thread.length_mm
+    cycles = max(1, math.ceil(thread.length_mm / thread.pitch_mm))
+    pitch_step = thread.pitch_mm
+    if cycles > 240:
+        cycles = 240
+        pitch_step = thread.length_mm / cycles
+
+    segments: list[PreviewSegment] = []
+    current_z = start_z
+    for _index in range(cycles):
+        next_z = max(end_z, current_z - pitch_step)
+        if next_z >= current_z:
+            break
+        root_z = (current_z + next_z) / 2.0
+        segments.extend(
+            [
+                PreviewSegment(
+                    start_x_mm=major_diameter,
+                    start_z_mm=current_z,
+                    end_x_mm=minor_diameter,
+                    end_z_mm=root_z,
+                    mode="thread",
+                    line_number=0,
+                ),
+                PreviewSegment(
+                    start_x_mm=minor_diameter,
+                    start_z_mm=root_z,
+                    end_x_mm=major_diameter,
+                    end_z_mm=next_z,
+                    mode="thread",
+                    line_number=0,
+                ),
+            ]
+        )
+        current_z = next_z
+        if current_z <= end_z + 1e-9:
+            break
     return segments
 
 

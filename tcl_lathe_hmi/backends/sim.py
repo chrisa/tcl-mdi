@@ -111,6 +111,36 @@ class SimBackend:
         )
         return True
 
+    def thread_sync_move(
+        self,
+        *,
+        z_mm: float,
+        pitch: float,
+        slew: int = 61,
+    ) -> None:
+        self._require_ready()
+        if pitch <= 0.0:
+            raise CommandRejectedError("thread pitch must be positive")
+        if z_mm == 0.0:
+            return
+        self._pending_position = (self._state.x_mm, self._state.z_mm + z_mm)
+        self._busy_until = time.monotonic() + self.config.sim_motion_time_s
+        self._state = replace(
+            self._state,
+            busy=True,
+            status_message="sim: thread sync move queued",
+        )
+
+    def dwell(self, *, seconds: float) -> None:
+        self._require_ready()
+        self._pending_position = None
+        self._busy_until = time.monotonic() + max(0.0, seconds)
+        self._state = replace(
+            self._state,
+            busy=True,
+            status_message=f"sim: dwell {max(0.0, seconds):0.3f}s queued",
+        )
+
     def wait_idle(self, timeout_ms: int | None = None) -> None:
         deadline = None
         if timeout_ms is not None:

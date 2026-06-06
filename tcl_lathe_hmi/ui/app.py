@@ -46,13 +46,20 @@ from tcl_lathe_hmi.ui.panels.setup import SetupPanel
 from tcl_lathe_hmi.ui.panels.tools import ToolsPanel
 
 
+START_MAXIMISE_RETRY_INTERVAL_S = 0.2
+START_MAXIMISE_RETRIES = 10
+
+
 class TclLatheHmiApp(App):
     title = "TCL Lathe HMI"
 
-    def __init__(self, *, backend_name: str = "sim", **kwargs):
+    def __init__(
+        self, *, backend_name: str = "sim", start_maximised: bool = False, **kwargs
+    ):
         super().__init__(**kwargs)
         self.machine_config = MachineConfig()
         self.backend_name = backend_name
+        self.start_maximised = start_maximised
         self.service = MachineService(
             create_backend(backend_name, self.machine_config),
             config=self.machine_config,
@@ -76,6 +83,19 @@ class TclLatheHmiApp(App):
             self.machine_config.ui_poll_interval_s,
         )
         return self.panel
+
+    def on_start(self):
+        if self.start_maximised:
+            for attempt in range(START_MAXIMISE_RETRIES):
+                Clock.schedule_once(
+                    self._maximise_startup_window,
+                    attempt * START_MAXIMISE_RETRY_INTERVAL_S,
+                )
+
+    def _maximise_startup_window(self, *_args):
+        from kivy.core.window import Window
+
+        Window.maximize()
 
     def on_stop(self):
         if self._poll_event is not None:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import sys
+import types
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -13,6 +17,7 @@ from tcl_lathe_hmi.ui.widgets import bind_release
 
 pytest.importorskip("kivy")
 
+from tcl_lathe_hmi.ui import app as app_module
 from tcl_lathe_hmi.ui.app import ManualPanel, action_button, toggle_button
 from tcl_lathe_hmi.ui.keypad import NumberEntryButton
 
@@ -84,6 +89,38 @@ def test_stuck_action_button_recovers_and_fires_once():
 
 def test_default_jog_accumulate_delay_is_half_second():
     assert MachineConfig().jog_accumulate_delay_s == 0.5
+
+
+def test_app_start_schedules_window_maximise(monkeypatch):
+    calls: list[str] = []
+    scheduled_once: list[tuple[Callable[[float], object], float]] = []
+    fake_window_module = types.ModuleType("kivy.core.window")
+    cast(Any, fake_window_module).Window = types.SimpleNamespace(
+        maximize=lambda: calls.append("maximize"),
+    )
+
+    def fake_schedule_once(callback, timeout):
+        scheduled_once.append((callback, timeout))
+
+    monkeypatch.setitem(sys.modules, "kivy.core.window", fake_window_module)
+    monkeypatch.setattr(app_module.Clock, "schedule_once", fake_schedule_once)
+    app = app_module.TclLatheHmiApp.__new__(app_module.TclLatheHmiApp)
+    app.start_maximised = True
+
+    app_module.TclLatheHmiApp.on_start(app)
+
+    assert scheduled_once == [
+        (
+            app._maximise_startup_window,
+            attempt * app_module.START_MAXIMISE_RETRY_INTERVAL_S,
+        )
+        for attempt in range(app_module.START_MAXIMISE_RETRIES)
+    ]
+
+    callback, _timeout = scheduled_once[0]
+    callback(0)
+
+    assert calls == ["maximize"]
 
 
 def test_manual_panel_shows_accumulated_jog_indicator_after_second_tap(tmp_path: Path):

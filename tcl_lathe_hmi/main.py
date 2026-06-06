@@ -19,12 +19,18 @@ def main(argv: list[str] | None = None) -> int:
         help="run in a normal window instead of taking over the display",
     )
     parser.add_argument(
+        "--maximised",
+        action="store_true",
+        help="maximise the startup window when running with --windowed",
+    )
+    parser.add_argument(
         "--show-cursor",
         action="store_true",
         help="show the mouse cursor",
     )
     parser.add_argument(
         "--input-mode",
+        "--input",
         choices=("touch", "mouse", "dual"),
         default=None,
         help=(
@@ -61,7 +67,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         raise
 
-    TclLatheHmiApp(backend_name=args.backend).run()
+    TclLatheHmiApp(
+        backend_name=args.backend,
+        start_maximised=args.windowed and args.maximised,
+    ).run()
     return 0
 
 

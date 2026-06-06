@@ -48,7 +48,7 @@ from tcl_lathe_hmi.gcode import (
 from tcl_lathe_hmi.machine import MachineService, MachineState
 from tcl_lathe_hmi.tools import ToolRecord, ToolTable
 from tcl_lathe_hmi.ui.keypad import NumberEntryButton
-from tcl_lathe_hmi.ui.widgets import bind_release
+from tcl_lathe_hmi.ui.widgets import bind_release, configure_touch_release
 
 
 BG = (0.07, 0.08, 0.09, 1)
@@ -2558,7 +2558,7 @@ def action_button(text: str, color, *, width: int | None = None) -> Button:
     kwargs = {}
     if width is not None:
         kwargs = {"size_hint_x": None, "width": width}
-    return Button(
+    button = Button(
         text=text,
         font_size=22,
         bold=True,
@@ -2567,6 +2567,8 @@ def action_button(text: str, color, *, width: int | None = None) -> Button:
         background_color=color,
         **kwargs,
     )
+    configure_touch_release(button)
+    return button
 
 
 def jog_button(text: str) -> Button:

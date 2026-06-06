@@ -9,6 +9,12 @@ from kivy.clock import Clock
 DEFAULT_RELEASE_DEBOUNCE_S = 0.08
 
 
+def configure_touch_release(widget) -> None:
+    """Make touch buttons tolerate slight finger drift before touch-up."""
+    if hasattr(widget, "always_release"):
+        widget.always_release = True
+
+
 def bind_release(
     widget,
     callback: Callable[..., object],

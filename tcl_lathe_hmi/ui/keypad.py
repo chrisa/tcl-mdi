@@ -9,7 +9,7 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 
-from tcl_lathe_hmi.ui.widgets import bind_release
+from tcl_lathe_hmi.ui.widgets import bind_release, configure_touch_release
 
 
 TEXT = (0.93, 0.94, 0.92, 1)
@@ -48,6 +48,7 @@ class NumberEntryButton(Button):
         self.halign = "right"
         self.text = str(text)
         self.value = _coerce_value(self.text, self.integer, 0)
+        configure_touch_release(self)
         bind_release(self, lambda *_: self.open_keypad())
 
     def set_value(self, value: float | int) -> None:
@@ -148,6 +149,7 @@ class NumberEntryPopup(Popup):
             background_color=color,
             **kwargs,
         )
+        configure_touch_release(button)
         bind_release(button, lambda btn: handler(btn))
         return button
 

@@ -35,6 +35,12 @@ class FredBackend:
         self._client: Any | None = None
         self._state = MachineState(status_message="fred: disconnected")
         self._commanded_spindle = SpindleState()
+        self._pending_completion: str | None = None
+        self._pending_motion_target_mm: tuple[float, float] | None = None
+        self._pending_snapshot_generation: int | None = None
+        self._pending_tool_dwell_s = 0.0
+        self._pending_tool_complete_at: float | None = None
+        self._latest_snapshot_generation: int | None = None
 
     def connect(self) -> None:
         self.disconnect()
@@ -77,6 +83,8 @@ class FredBackend:
         self._client = None
         self._state = MachineState(status_message="fred: disconnected")
         self._commanded_spindle = SpindleState()
+        self._clear_pending_completion()
+        self._latest_snapshot_generation = None
 
     def poll(self) -> MachineState:
         client = self._require_client()
@@ -91,13 +99,27 @@ class FredBackend:
 
         state = self._state
         if snapshot is not None:
+            self._latest_snapshot_generation = _snapshot_generation(snapshot)
             state = _apply_snapshot(state, snapshot, self._commanded_spindle, self.config)
 
-        busy = not bool(status.get("idle", True))
+        controller_busy = not bool(status.get("idle", True))
         error = bool(status.get("error", False))
-        message = "fred: busy" if busy else "fred: idle"
         if error:
+            self._clear_pending_completion()
             message = "fred: controller error"
+            busy = False
+        else:
+            pending_busy, pending_message = self._pending_completion_status(
+                state,
+                controller_busy=controller_busy,
+            )
+            busy = controller_busy or pending_busy
+            if controller_busy:
+                message = "fred: busy"
+            elif pending_message is not None:
+                message = pending_message
+            else:
+                message = "fred: idle"
 
         self._state = replace(
             state,
@@ -119,6 +141,8 @@ class FredBackend:
         slew: int = 61,
     ) -> None:
         client = self._require_ready()
+        target = (self._state.x_mm + x_mm, self._state.z_mm + z_mm)
+        baseline_generation = self._latest_snapshot_generation
         if mode == "rapid":
             command_active = client.rapid_move_delta(
                 x_mm=x_mm,
@@ -137,6 +161,8 @@ class FredBackend:
         else:
             raise CommandRejectedError(f"fred: unsupported jog mode: {mode}")
 
+        if command_active:
+            self._set_pending_motion_completion(target, baseline_generation)
         self._state = replace(
             self._state,
             busy=bool(command_active),
@@ -146,6 +172,7 @@ class FredBackend:
     def set_spindle(self, *, on: bool, rpm: float = 0.0, forward: bool = True) -> None:
         client = self._require_ready()
         target = max(0.0, float(rpm)) if on else 0.0
+        baseline_generation = self._latest_snapshot_generation
         try:
             command_active = client.set_spindle(
                 on=on,
@@ -156,17 +183,20 @@ class FredBackend:
         except Exception as exc:
             raise BackendError(f"fred: spindle command failed: {exc}") from exc
 
-        self._commanded_spindle = replace(
-            self._commanded_spindle,
+        actual_rpm = self._state.spindle.actual_rpm
+        self._commanded_spindle = SpindleState(
             commanded_on=on,
             forward=forward,
             target_rpm=target,
-            at_speed=not on,
+            actual_rpm=actual_rpm,
+            at_speed=_spindle_at_speed(on, target, actual_rpm, self.config),
         )
+        if not self._commanded_spindle.at_speed:
+            self._set_pending_spindle_completion(baseline_generation)
         self._state = replace(
             self._state,
             spindle=self._commanded_spindle,
-            busy=bool(command_active),
+            busy=bool(command_active) or self._pending_completion == "spindle",
             status_message="fred: spindle command queued",
         )
 
@@ -190,6 +220,8 @@ class FredBackend:
         except Exception as exc:
             raise BackendError(f"fred: toolchanger command failed: {exc}") from exc
 
+        if command_active:
+            self._set_pending_tool_completion(_turret_step_count(current_station, target_station))
         self._state = replace(
             self._state,
             busy=bool(command_active),
@@ -202,13 +234,18 @@ class FredBackend:
         return bool(command_active)
 
     def wait_idle(self, timeout_ms: int | None = None) -> None:
-        client = self._require_client()
-        try:
-            client.wait_idle(timeout_ms=timeout_ms)
-        except Exception as exc:
-            raise BackendError(f"fred: timeout waiting for idle: {exc}") from exc
+        deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000.0
 
-        self.poll()
+        while True:
+            try:
+                state = self.poll()
+            except Exception as exc:
+                raise BackendError(f"fred: timeout waiting for idle: {exc}") from exc
+            if not state.busy:
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BackendError("fred: timeout waiting for idle")
+            time.sleep(min(0.02, max(0.001, self.config.fred_poll_period_ms / 1000.0)))
 
     def _require_client(self) -> Any:
         if self._client is None:
@@ -223,6 +260,90 @@ class FredBackend:
         if state.busy:
             raise CommandRejectedError("fred: controller busy")
         return client
+
+    def _set_pending_motion_completion(
+        self,
+        target_mm: tuple[float, float],
+        baseline_generation: int | None,
+    ) -> None:
+        self._pending_completion = "motion"
+        self._pending_motion_target_mm = target_mm
+        self._pending_snapshot_generation = baseline_generation
+
+    def _set_pending_spindle_completion(self, baseline_generation: int | None) -> None:
+        self._pending_completion = "spindle"
+        self._pending_motion_target_mm = None
+        self._pending_snapshot_generation = baseline_generation
+
+    def _set_pending_tool_completion(self, station_count: int) -> None:
+        self._pending_completion = "tool"
+        self._pending_motion_target_mm = None
+        self._pending_snapshot_generation = None
+        dwell_per_station = max(0.0, self.config.fred_tool_station_dwell_s)
+        self._pending_tool_dwell_s = dwell_per_station * station_count
+        self._pending_tool_complete_at = None
+
+    def _clear_pending_completion(self) -> None:
+        self._pending_completion = None
+        self._pending_motion_target_mm = None
+        self._pending_snapshot_generation = None
+        self._pending_tool_dwell_s = 0.0
+        self._pending_tool_complete_at = None
+
+    def _pending_completion_status(
+        self,
+        state: MachineState,
+        *,
+        controller_busy: bool,
+    ) -> tuple[bool, str | None]:
+        if self._pending_completion is None or controller_busy:
+            return False, None
+
+        if self._pending_completion == "motion":
+            if self._pending_motion_target_mm is None:
+                self._clear_pending_completion()
+                return False, None
+            if not self._has_fresh_snapshot_since_pending_started():
+                return True, "fred: waiting for motion feedback"
+            if not _motion_at_target(
+                state,
+                self._pending_motion_target_mm,
+                self.config.fred_motion_settle_tolerance_mm,
+            ):
+                return True, "fred: settling to target"
+            self._clear_pending_completion()
+            return False, None
+
+        if self._pending_completion == "spindle":
+            if not self._has_fresh_snapshot_since_pending_started():
+                return True, "fred: waiting for spindle feedback"
+            if not state.spindle.at_speed:
+                return True, "fred: spindle ramping to speed"
+            self._clear_pending_completion()
+            return False, None
+
+        if self._pending_completion == "tool":
+            if self._pending_tool_dwell_s <= 0.0:
+                self._clear_pending_completion()
+                return False, None
+            now = time.monotonic()
+            if self._pending_tool_complete_at is None:
+                self._pending_tool_complete_at = now + self._pending_tool_dwell_s
+            if now < self._pending_tool_complete_at:
+                return True, "fred: toolchanger settling"
+            self._clear_pending_completion()
+            return False, None
+
+        self._clear_pending_completion()
+        return False, None
+
+    def _has_fresh_snapshot_since_pending_started(self) -> bool:
+        if self._pending_snapshot_generation is None or self._latest_snapshot_generation is None:
+            return True
+        return _generation_after(
+            self._latest_snapshot_generation,
+            self._pending_snapshot_generation,
+        )
 
 
 def _load_fred_client() -> FredClientFactory:
@@ -273,6 +394,38 @@ def _apply_snapshot(
         z_counts=_optional_int(snapshot.get("z_counts")),
         spindle=spindle,
     )
+
+
+def _motion_at_target(
+    state: MachineState,
+    target_mm: tuple[float, float],
+    tolerance_mm: float,
+) -> bool:
+    target_x_mm, target_z_mm = target_mm
+    return (
+        abs(state.x_mm - target_x_mm) <= tolerance_mm
+        and abs(state.z_mm - target_z_mm) <= tolerance_mm
+    )
+
+
+def _snapshot_generation(snapshot: dict[str, object]) -> int | None:
+    value = snapshot.get("generation")
+    if value is None:
+        return None
+    return int(value)
+
+
+def _generation_after(current: int, previous: int) -> bool:
+    diff = (current - previous) & 0xFFFFFFFF
+    return diff != 0 and diff < 0x80000000
+
+
+def _turret_step_count(current_station: int, target_station: int) -> int:
+    if current_station == target_station:
+        return 0
+    if current_station < target_station:
+        return target_station - current_station
+    return 8 - (current_station - target_station)
 
 
 def _spindle_at_speed(

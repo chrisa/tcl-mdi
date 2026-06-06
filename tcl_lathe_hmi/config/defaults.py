@@ -12,6 +12,8 @@ class MachineConfig:
     usb_pid: int = 0x000A
     usb_timeout_ms: int = 1000
     fred_poll_period_ms: int = 20
+    fred_motion_settle_tolerance_mm: float = 0.03
+    fred_tool_station_dwell_s: float = 0.5
 
     x_counts_per_mm: float = 100.0
     z_counts_per_mm: float = 100.0

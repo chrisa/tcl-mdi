@@ -73,6 +73,12 @@ Run against FRED USB:
 ./run.sh --backend fred
 ```
 
+The default input mode is `touch`, which uses Kivy's Linux touchscreen probe
+provider and disables the mouse provider. This avoids double-processing panels
+such as Elo monitors that expose both touchscreen and mouse-compatible HID
+interfaces. For bench debugging, use `--show-cursor` for mouse-only input, or
+`--input-mode dual` to compare against mouse-plus-touch behavior.
+
 The FRED backend imports `fred_client` lazily. By default it looks for the
 local client at `../tcl202_dis/rp2040_fred/python` relative to this project.
 Set `TCL_LATHE_FRED_PYTHON` to override that path.

@@ -23,6 +23,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="show the mouse cursor",
     )
+    parser.add_argument(
+        "--input-mode",
+        choices=("touch", "mouse", "dual"),
+        default=None,
+        help=(
+            "input provider mode: touch uses Linux touch devices only, mouse uses "
+            "window mouse events only, dual uses both with mouse suppression"
+        ),
+    )
     raw_args = sys.argv[1:] if argv is None else list(argv)
     if raw_args and raw_args[0] == "--":
         raw_args = raw_args[1:]
@@ -33,7 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         sys.argv = [sys.argv[0]]
 
-    _configure_kivy(fullscreen=not args.windowed, show_cursor=args.show_cursor)
+    input_mode = args.input_mode or ("mouse" if args.show_cursor else "touch")
+    _configure_kivy(
+        fullscreen=not args.windowed,
+        show_cursor=args.show_cursor,
+        input_mode=input_mode,
+    )
 
     try:
         from tcl_lathe_hmi.ui.app import TclLatheHmiApp
@@ -51,18 +65,31 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _configure_kivy(*, fullscreen: bool, show_cursor: bool) -> None:
+def _configure_kivy(*, fullscreen: bool, show_cursor: bool, input_mode: str) -> None:
     from kivy.config import Config
 
     Config.set("graphics", "fullscreen", "auto" if fullscreen else "0")
     Config.set("graphics", "borderless", "1" if fullscreen else "0")
     Config.set("graphics", "show_cursor", "1" if show_cursor else "0")
-    # Many touchscreens also emit mouse compatibility events. In cursor-visible
-    # debug mode, keep normal mouse input so the pointer remains authoritative.
-    if show_cursor:
+    if input_mode == "mouse":
         _configure_mouse_only_input(Config)
+    elif input_mode == "dual":
+        _configure_dual_input(Config)
     else:
-        Config.set("input", "mouse", "mouse,disable_on_activity")
+        _configure_touch_only_input(Config)
+
+
+def _configure_touch_only_input(config) -> None:
+    for key, _value in list(config.items("input")):
+        config.remove_option("input", key)
+    config.set("input", "%(name)s", "probesysfs")
+
+
+def _configure_dual_input(config) -> None:
+    for key, _value in list(config.items("input")):
+        config.remove_option("input", key)
+    config.set("input", "%(name)s", "probesysfs")
+    config.set("input", "mouse", "mouse,disable_on_activity")
 
 
 def _configure_mouse_only_input(config) -> None:

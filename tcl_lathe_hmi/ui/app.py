@@ -414,20 +414,20 @@ class ManualPanel(BoxLayout):
         grid = GridLayout(cols=3, rows=3, spacing=8, size_hint_y=0.32)
         paint(grid, PANEL_ALT)
 
-        z_plus = jog_button("Z+")
-        x_minus = jog_button("X-")
-        stop = action_button("STOP", RED)
         x_plus = jog_button("X+")
         z_minus = jog_button("Z-")
+        cancel = action_button("CANCEL", AMBER)
+        z_plus = jog_button("Z+")
+        x_minus = jog_button("X-")
         buttons: list[Button | None] = [
             None,
-            z_plus,
-            None,
-            x_minus,
-            stop,
             x_plus,
             None,
             z_minus,
+            cancel,
+            z_plus,
+            None,
+            x_minus,
             None,
         ]
 
@@ -439,11 +439,11 @@ class ManualPanel(BoxLayout):
             self.command_widgets.append(btn)
             grid.add_widget(btn)
 
-        bind_release(z_plus, lambda *_: self._jog(z_sign=1.0))
-        bind_release(x_minus, lambda *_: self._jog(x_sign=-1.0))
-        bind_release(stop, lambda *_: self._stop_jog())
         bind_release(x_plus, lambda *_: self._jog(x_sign=1.0))
         bind_release(z_minus, lambda *_: self._jog(z_sign=-1.0))
+        bind_release(cancel, lambda *_: self._cancel_queued_jog())
+        bind_release(z_plus, lambda *_: self._jog(z_sign=1.0))
+        bind_release(x_minus, lambda *_: self._jog(x_sign=-1.0))
         return grid
 
     def _build_toolchanger_controls(self) -> BoxLayout:
@@ -699,18 +699,24 @@ class ManualPanel(BoxLayout):
 
     def _set_increment(self, button: ToggleButton, value: float) -> None:
         if button.state == "down":
+            self._select_jog_increment_button(button)
             self.increment_mm = value
             self.use_custom_increment = False
 
     def _set_custom_increment(self, button: ToggleButton) -> None:
         if button.state == "down":
+            self._select_jog_increment_button(button)
             self.use_custom_increment = True
             self.custom_increment_mm = self._current_custom_increment()
 
     def _custom_increment_changed(self, value: float | int) -> None:
         self.custom_increment_mm = abs(float(value))
-        self.custom_increment_button.state = "down"
+        self._select_jog_increment_button(self.custom_increment_button)
         self.use_custom_increment = True
+
+    def _select_jog_increment_button(self, selected: ToggleButton) -> None:
+        for button in self.jog_increment_buttons:
+            button.state = "down" if button is selected else "normal"
 
     def _current_custom_increment(self) -> float:
         value = abs(parse_number(self.custom_increment_input.text, self.custom_increment_mm))
@@ -776,14 +782,15 @@ class ManualPanel(BoxLayout):
             self._set_status(f"Jog sent X {x_mm:+0.3f} Z {z_mm:+0.3f}")
         self.refresh(self.service.state)
 
-    def _stop_jog(self) -> None:
+    def _cancel_queued_jog(self) -> None:
         if self.queued_jog_event is not None:
             self.queued_jog_event.cancel()
             self.queued_jog_event = None
             self._clear_queued_jog()
             self._set_status("Queued jog cancelled")
             return
-        self._set_status("Stop requested; no abort primitive yet")
+        self._clear_queued_jog()
+        self._set_status("No queued jog to cancel")
 
     def _spindle(self, *, on: bool, forward: bool) -> None:
         rpm = parse_number(self.rpm_input.text, self.config.default_spindle_rpm)
@@ -1468,6 +1475,7 @@ class CamPanel(BoxLayout):
                 background_down="",
                 background_color=BUTTON,
             )
+            configure_touch_release(button, recover_stuck=False)
             if name == "turning":
                 button.state = "down"
             if name == "thread":
@@ -1620,6 +1628,7 @@ class CamPanel(BoxLayout):
             background_down="",
             background_color=BUTTON,
         )
+        configure_touch_release(button, recover_stuck=False)
         button.state = "down" if getattr(self, attr) else "normal"
         self._style_flag(button)
         bind_release(button, lambda btn: self._set_flag(attr, btn))
@@ -2670,7 +2679,7 @@ def jog_button(text: str) -> Button:
 
 
 def toggle_button(text: str, *, group: str) -> ToggleButton:
-    return ToggleButton(
+    button = ToggleButton(
         text=text,
         group=group,
         allow_no_selection=False,
@@ -2681,6 +2690,8 @@ def toggle_button(text: str, *, group: str) -> ToggleButton:
         background_down="",
         background_color=BUTTON,
     )
+    configure_touch_release(button, recover_stuck=False)
+    return button
 
 
 def numeric_input(

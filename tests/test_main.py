@@ -68,3 +68,58 @@ def test_mouse_visible_mode_removes_raw_touch_input_providers():
     main_module._configure_mouse_only_input(config)
 
     assert config.values == {"mouse": "mouse"}
+
+
+def test_touch_mode_removes_mouse_input_provider():
+    class FakeConfig:
+        def __init__(self):
+            self.values = {
+                "mouse": "mouse,disable_on_activity",
+                "%(name)s": "probesysfs",
+                "device_touchpad": "mtdev,/dev/input/event13",
+            }
+
+        def items(self, section):
+            assert section == "input"
+            return list(self.values.items())
+
+        def remove_option(self, section, key):
+            assert section == "input"
+            self.values.pop(key)
+
+        def set(self, section, key, value):
+            assert section == "input"
+            self.values[key] = value
+
+    config = FakeConfig()
+
+    main_module._configure_touch_only_input(config)
+
+    assert config.values == {"%(name)s": "probesysfs"}
+
+
+def test_dual_mode_keeps_touch_and_suppressed_mouse():
+    class FakeConfig:
+        def __init__(self):
+            self.values = {"stale": "provider"}
+
+        def items(self, section):
+            assert section == "input"
+            return list(self.values.items())
+
+        def remove_option(self, section, key):
+            assert section == "input"
+            self.values.pop(key)
+
+        def set(self, section, key, value):
+            assert section == "input"
+            self.values[key] = value
+
+    config = FakeConfig()
+
+    main_module._configure_dual_input(config)
+
+    assert config.values == {
+        "%(name)s": "probesysfs",
+        "mouse": "mouse,disable_on_activity",
+    }

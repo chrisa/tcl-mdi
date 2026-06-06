@@ -63,7 +63,7 @@ def _turning_program(job: LatheCamJob) -> list[str]:
     lines = [
         "(Turning)",
         _tool_change_line(job.turning.tool_number, job.turning.station),
-        f"S{_fmt(job.turning.spindle_rpm)} M3",
+        _reverse_spindle_line(job.turning.spindle_rpm),
     ]
 
     common_params = {
@@ -119,7 +119,7 @@ def _hole_program(job: LatheCamJob) -> list[str]:
             [
                 "(Center drill)",
                 _tool_change_line(job.hole.center_tool_number, job.hole.center_station),
-                f"S{_fmt(job.hole.spindle_rpm)} M3",
+                _reverse_spindle_line(job.hole.spindle_rpm),
                 f"G0 X0 Z{_fmt(safe_z)}",
                 f"G1 Z{_fmt(front - job.hole.center_depth_mm)} F{_fmt(job.hole.center_feed)}",
                 f"G0 Z{_fmt(safe_z)}",
@@ -131,7 +131,7 @@ def _hole_program(job: LatheCamJob) -> list[str]:
             [
                 "(Peck drill)",
                 _tool_change_line(job.hole.drill_tool_number, job.hole.drill_station),
-                f"S{_fmt(job.hole.spindle_rpm)} M3",
+                _reverse_spindle_line(job.hole.spindle_rpm),
                 f"G0 X0 Z{_fmt(safe_z)}",
             ]
         )
@@ -151,7 +151,7 @@ def _hole_program(job: LatheCamJob) -> list[str]:
             [
                 "(Bore)",
                 _tool_change_line(job.hole.boring_tool_number, job.hole.boring_station),
-                f"S{_fmt(job.hole.spindle_rpm)} M3",
+                _reverse_spindle_line(job.hole.spindle_rpm),
             ]
         )
         current_diameter = job.hole.drill_diameter_mm
@@ -183,7 +183,7 @@ def _thread_program(job: LatheCamJob) -> list[str]:
     lines = [
         "(External thread)",
         _tool_change_line(thread.tool_number, thread.station),
-        f"S{_fmt(thread.spindle_rpm)} M3",
+        _reverse_spindle_line(thread.spindle_rpm),
         f"G0 X{_fmt(retract_x)} Z{_fmt(start_z)}",
     ]
 
@@ -433,6 +433,10 @@ def _tool_change_line(tool_number: int, station: int | None) -> str:
     if station is not None:
         line += f" K{station}"
     return line
+
+
+def _reverse_spindle_line(rpm: float) -> str:
+    return f"S{_fmt(rpm)} M4"
 
 
 def _gcode_line(movement: str, params: dict[str, float]) -> str:

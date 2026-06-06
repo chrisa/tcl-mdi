@@ -170,6 +170,8 @@ def test_generate_cam_program_parses_when_liblathe_is_available():
         pytest.skip(str(exc))
 
     assert "M06 I1 K1" in program.gcode
+    assert "S1200 M4" in program.gcode
+    assert " M3" not in program.gcode
     assert "M5" in program.gcode
     assert program.part_outline
 
@@ -177,6 +179,22 @@ def test_generate_cam_program_parses_when_liblathe_is_available():
     moves = [action for action in parsed.actions if isinstance(action, MoveAction)]
     assert moves
     assert max(action.target_x_mm for action in moves) > 20.0
+
+
+def test_hole_cam_spindle_starts_are_reverse():
+    program = generate_cam_program(
+        LatheCamJob(
+            hole=HoleSpec(
+                center_drill=True,
+                drill=True,
+                bore=True,
+                spindle_rpm=1000.0,
+            )
+        )
+    )
+
+    assert program.gcode.count("S1000 M4") == 3
+    assert " M3" not in program.gcode
 
 
 def test_part_outline_includes_metric_thread_teeth():
@@ -222,7 +240,8 @@ def test_thread_cam_generates_g33_passes_and_retracts():
     )
 
     assert "M06 I6 K6" in program.gcode
-    assert "S300 M3" in program.gcode
+    assert "S300 M4" in program.gcode
+    assert " M3" not in program.gcode
     assert program.gcode.count("G33 Z-12 K1.5") == 5
     assert "G0 X20 Z0" in program.gcode
     assert "G0 X14.8 Z0" in program.gcode

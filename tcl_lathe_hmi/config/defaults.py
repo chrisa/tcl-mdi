@@ -18,7 +18,7 @@ class MachineConfig:
 
     jog_slew: int = 61
     jog_feed: int = 100
-    jog_accumulate_delay_s: float = 0.25
+    jog_accumulate_delay_s: float = 0.5
     default_spindle_rpm: float = 1200.0
     spindle_at_speed_tolerance_rpm: float = 100.0
 

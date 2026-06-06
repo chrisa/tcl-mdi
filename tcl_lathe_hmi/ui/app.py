@@ -136,7 +136,11 @@ class ManualPanel(BoxLayout):
         self.jog_mode = "feed"
         self.queued_jog_x_mm = 0.0
         self.queued_jog_z_mm = 0.0
+        self.queued_jog_tap_count = 0
         self.queued_jog_event = None
+        self.jog_queue_container: BoxLayout | None = None
+        self.jog_queue_bar: JogQueueBar | None = None
+        self.jog_queue_length_label: Label | None = None
         self.command_widgets: list[Button | ToggleButton | TextInput | NumberEntryButton] = []
         self.jog_increment_buttons: list[ToggleButton] = []
         self.jog_mode_buttons: list[ToggleButton] = []
@@ -161,6 +165,7 @@ class ManualPanel(BoxLayout):
         if self.queued_jog_event is not None:
             self.queued_jog_event.cancel()
             self.queued_jog_event = None
+        self._clear_queued_jog()
         if self._status_flash_event is not None:
             self._status_flash_event.cancel()
             self._status_flash_event = None
@@ -249,6 +254,39 @@ class ManualPanel(BoxLayout):
         )
         self.message_label.bind(size=lambda widget, *_: setattr(widget, "text_size", widget.size))
         bar.add_widget(self.message_label)
+
+        self.jog_queue_container = BoxLayout(
+            orientation="horizontal",
+            spacing=8,
+            size_hint_x=None,
+            width=430,
+            opacity=0.0,
+        )
+        self.jog_queue_container.add_widget(
+            Label(
+                text="JOG",
+                color=MUTED,
+                font_size=18,
+                size_hint_x=None,
+                width=48,
+            )
+        )
+        self.jog_queue_bar = JogQueueBar(size_hint_x=None, width=270, size_hint_y=None, height=20)
+        self.jog_queue_container.add_widget(self.jog_queue_bar)
+        self.jog_queue_length_label = Label(
+            text="",
+            color=TEXT,
+            font_size=18,
+            halign="left",
+            valign="middle",
+            size_hint_x=None,
+            width=96,
+        )
+        self.jog_queue_length_label.bind(
+            size=lambda widget, *_: setattr(widget, "text_size", widget.size)
+        )
+        self.jog_queue_container.add_widget(self.jog_queue_length_label)
+        bar.add_widget(self.jog_queue_container)
 
         self.tool_label = Label(text="T0", color=TEXT, font_size=24, size_hint_x=None, width=90)
         bar.add_widget(self.tool_label)
@@ -702,12 +740,14 @@ class ManualPanel(BoxLayout):
         increment_mm = self._current_jog_increment()
         self.queued_jog_x_mm += x_sign * increment_mm
         self.queued_jog_z_mm += z_sign * increment_mm
+        self.queued_jog_tap_count += 1
         if self.queued_jog_event is not None:
             self.queued_jog_event.cancel()
         self.queued_jog_event = Clock.schedule_once(
             self._flush_queued_jog,
             self.config.jog_accumulate_delay_s,
         )
+        self._update_queued_jog_indicator()
         self._set_status(
             f"Queued jog X {self.queued_jog_x_mm:+0.3f} Z {self.queued_jog_z_mm:+0.3f}"
         )
@@ -715,9 +755,8 @@ class ManualPanel(BoxLayout):
     def _flush_queued_jog(self, _dt) -> None:
         x_mm = self.queued_jog_x_mm
         z_mm = self.queued_jog_z_mm
-        self.queued_jog_x_mm = 0.0
-        self.queued_jog_z_mm = 0.0
         self.queued_jog_event = None
+        self._clear_queued_jog()
 
         if abs(x_mm) < 1e-9 and abs(z_mm) < 1e-9:
             self._set_status("Queued jog cancelled")
@@ -741,8 +780,7 @@ class ManualPanel(BoxLayout):
         if self.queued_jog_event is not None:
             self.queued_jog_event.cancel()
             self.queued_jog_event = None
-            self.queued_jog_x_mm = 0.0
-            self.queued_jog_z_mm = 0.0
+            self._clear_queued_jog()
             self._set_status("Queued jog cancelled")
             return
         self._set_status("Stop requested; no abort primitive yet")
@@ -813,6 +851,40 @@ class ManualPanel(BoxLayout):
         if flash:
             self._flash_status_indicator()
         self.refresh(self.service.state)
+
+    def _clear_queued_jog(self) -> None:
+        self.queued_jog_x_mm = 0.0
+        self.queued_jog_z_mm = 0.0
+        self.queued_jog_tap_count = 0
+        self._update_queued_jog_indicator()
+
+    def _update_queued_jog_indicator(self) -> None:
+        if (
+            self.jog_queue_container is None
+            or self.jog_queue_bar is None
+            or self.jog_queue_length_label is None
+        ):
+            return
+
+        visible = self.queued_jog_tap_count >= 2
+        self.jog_queue_container.opacity = 1.0 if visible else 0.0
+        if not visible:
+            self.jog_queue_bar.set_progress(0.0)
+            self.jog_queue_length_label.text = ""
+            return
+
+        self.jog_queue_bar.set_progress(min(1.0, (self.queued_jog_tap_count - 1) / 8.0))
+        self.jog_queue_length_label.text = self._format_queued_jog_length()
+
+    def _format_queued_jog_length(self) -> str:
+        parts: list[str] = []
+        if abs(self.queued_jog_x_mm) >= 1e-9:
+            parts.append(f"X {self.queued_jog_x_mm:+0.3f}")
+        if abs(self.queued_jog_z_mm) >= 1e-9:
+            parts.append(f"Z {self.queued_jog_z_mm:+0.3f}")
+        if not parts:
+            return ""
+        return "  ".join(parts) + " mm"
 
     def _flash_status_indicator(self) -> None:
         if self._status_flash_event is not None:
@@ -2540,6 +2612,28 @@ class PreviewCanvas(Widget):
             ],
             width=1.4,
         )
+
+
+class JogQueueBar(Widget):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.progress = 0.0
+        with self.canvas.before:
+            Color(0.10, 0.11, 0.12, 1)
+            self._bg_rect = Rectangle(pos=self.pos, size=self.size)
+            Color(*BLUE)
+            self._fill_rect = Rectangle(pos=self.pos, size=(0, self.height))
+        self.bind(pos=self._update_rects, size=self._update_rects)
+
+    def set_progress(self, progress: float) -> None:
+        self.progress = max(0.0, min(1.0, progress))
+        self._update_rects()
+
+    def _update_rects(self, *_args) -> None:
+        self._bg_rect.pos = self.pos
+        self._bg_rect.size = self.size
+        self._fill_rect.pos = self.pos
+        self._fill_rect.size = (self.width * self.progress, self.height)
 
 
 def paint(widget, color) -> None:

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+
+MAX_TOOL_NUMBER = 12
+TURRET_STATIONS = 8
+REFERENCE_TOOL_NUMBER = 1
 
 WORD_RE = re.compile(r"([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
 
@@ -11,51 +16,21 @@ WORD_RE = re.compile(r"([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
 @dataclass(frozen=True)
 class ToolRecord:
     tool_number: int
-    station: int | None = None
     x_offset_mm: float = 0.0
     z_offset_mm: float = 0.0
-    diameter_mm: float = 0.0
-    front_angle_deg: float | None = None
-    back_angle_deg: float | None = None
-    orientation: int | None = None
-    comment: str = ""
+    description: str = ""
 
     @property
     def display_name(self) -> str:
-        suffix = f" P{self.station}" if self.station is not None else ""
-        return f"T{self.tool_number}{suffix}"
-
-    def to_linuxcnc_line(self) -> str:
-        parts = [
-            f"T{self.tool_number}",
-            f"X{self.x_offset_mm:.6g}",
-            "Y0.0",
-            f"Z{self.z_offset_mm:.6g}",
-            "A0.0",
-            "B0.0",
-            "C0.0",
-            "U0.0",
-            "V0.0",
-            "W0.0",
-            f"D{self.diameter_mm:.6g}",
-        ]
-        if self.station is not None:
-            parts.insert(1, f"P{self.station}")
-        if self.front_angle_deg is not None:
-            parts.append(f"I{self.front_angle_deg:.6g}")
-        if self.back_angle_deg is not None:
-            parts.append(f"J{self.back_angle_deg:.6g}")
-        if self.orientation is not None:
-            parts.append(f"Q{self.orientation}")
-        line = " ".join(parts)
-        if self.comment:
-            line += f" ;{self.comment}"
-        return line
+        return f"T{self.tool_number}"
 
 
 class ToolTable:
     def __init__(self, tools: list[ToolRecord] | None = None):
-        self._tools: dict[int, ToolRecord] = {}
+        self._tools: dict[int, ToolRecord] = {
+            tool_number: ToolRecord(tool_number=tool_number)
+            for tool_number in range(1, MAX_TOOL_NUMBER + 1)
+        }
         for tool in tools or []:
             self.upsert(tool)
 
@@ -66,57 +41,216 @@ class ToolTable:
     def get(self, tool_number: int) -> ToolRecord | None:
         return self._tools.get(tool_number)
 
-    def upsert(self, tool: ToolRecord) -> None:
-        if tool.tool_number < 0:
-            raise ValueError("tool_number must be non-negative")
-        if tool.station is not None and tool.station < 0:
-            raise ValueError("station must be non-negative")
-        self._tools[tool.tool_number] = tool
-
-    def remove(self, tool_number: int) -> None:
-        self._tools.pop(tool_number, None)
-
-    def ensure_tool(self, tool_number: int, station: int | None = None) -> ToolRecord:
-        existing = self.get(tool_number)
-        if existing is not None:
-            if station is not None and existing.station is None:
-                existing = replace(existing, station=station)
-                self.upsert(existing)
-            return existing
-        tool = ToolRecord(tool_number=tool_number, station=station)
-        self.upsert(tool)
+    def ensure_tool(self, tool_number: int) -> ToolRecord:
+        tool = self.get(tool_number)
+        if tool is None:
+            raise ValueError(f"tool number must be in range 1..{MAX_TOOL_NUMBER}")
         return tool
 
-    def import_linuxcnc(self, text: str) -> None:
-        self._tools.clear()
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            record = parse_linuxcnc_tool_line(line, line_number=line_number)
-            if record is not None:
-                self.upsert(record)
+    def upsert(self, tool: ToolRecord) -> None:
+        _validate_tool_number(tool.tool_number)
+        self._tools[tool.tool_number] = tool
 
-    def export_linuxcnc(self) -> str:
-        lines = [tool.to_linuxcnc_line() for tool in self.tools]
-        return "\n".join(lines) + ("\n" if lines else "")
+    def update_offsets(
+        self,
+        tool_number: int,
+        *,
+        x_offset_mm: float | None = None,
+        z_offset_mm: float | None = None,
+    ) -> ToolRecord:
+        tool = self.ensure_tool(tool_number)
+        updated = replace(
+            tool,
+            x_offset_mm=tool.x_offset_mm if x_offset_mm is None else x_offset_mm,
+            z_offset_mm=tool.z_offset_mm if z_offset_mm is None else z_offset_mm,
+        )
+        self.upsert(updated)
+        return updated
+
+    def update_description(self, tool_number: int, description: str) -> ToolRecord:
+        tool = self.ensure_tool(tool_number)
+        updated = replace(tool, description=description.strip())
+        self.upsert(updated)
+        return updated
+
+    def to_json(self) -> list[dict[str, object]]:
+        return [
+            {
+                "tool_number": tool.tool_number,
+                "x_offset_mm": tool.x_offset_mm,
+                "z_offset_mm": tool.z_offset_mm,
+                "description": tool.description,
+            }
+            for tool in self.tools
+        ]
 
     @classmethod
-    def from_linuxcnc(cls, text: str) -> "ToolTable":
-        table = cls()
-        table.import_linuxcnc(text)
+    def from_json(cls, data: object) -> "ToolTable":
+        if not isinstance(data, list):
+            raise ValueError("tools must be a list")
+        table = cls(sample_tool_records())
+        for item in data:
+            if not isinstance(item, dict):
+                raise ValueError("tool entries must be objects")
+            table.upsert(
+                ToolRecord(
+                    tool_number=int(item["tool_number"]),
+                    x_offset_mm=float(item.get("x_offset_mm", 0.0)),
+                    z_offset_mm=float(item.get("z_offset_mm", 0.0)),
+                    description=str(item.get("description", "")).strip(),
+                )
+            )
         return table
 
+
+@dataclass(frozen=True)
+class TurretStation:
+    station: int
+    tool_number: int | None = None
+
+
+class Turret:
+    def __init__(self, stations: dict[int, int | None] | None = None):
+        self._stations: dict[int, int | None] = {
+            station: None for station in range(1, TURRET_STATIONS + 1)
+        }
+        for station, tool_number in (stations or {}).items():
+            self.assign(tool_number, int(station))
+
+    @property
+    def stations(self) -> list[TurretStation]:
+        return [
+            TurretStation(station=station, tool_number=self._stations[station])
+            for station in sorted(self._stations)
+        ]
+
+    def tool_for_station(self, station: int) -> int | None:
+        _validate_station(station)
+        return self._stations[station]
+
+    def station_for_tool(self, tool_number: int) -> int | None:
+        _validate_tool_number(tool_number)
+        for station, assigned_tool in self._stations.items():
+            if assigned_tool == tool_number:
+                return station
+        return None
+
+    def assign(self, tool_number: int | None, station: int | None) -> None:
+        if tool_number is None:
+            if station is None:
+                return
+            _validate_station(station)
+            self._stations[station] = None
+            return
+
+        _validate_tool_number(tool_number)
+        if station is not None:
+            _validate_station(station)
+
+        for current_station, assigned_tool in list(self._stations.items()):
+            if assigned_tool == tool_number:
+                self._stations[current_station] = None
+
+        if station is not None:
+            self._stations[station] = tool_number
+
+    def to_json(self) -> dict[str, int | None]:
+        return {str(station): tool_number for station, tool_number in sorted(self._stations.items())}
+
     @classmethod
-    def load(cls, path: str | Path) -> "ToolTable":
-        return cls.from_linuxcnc(Path(path).expanduser().read_text())
+    def from_json(cls, data: object) -> "Turret":
+        if isinstance(data, dict) and isinstance(data.get("stations"), dict):
+            data = data["stations"]
+        if not isinstance(data, dict):
+            raise ValueError("turret stations must be an object")
+        stations: dict[int, int | None] = {}
+        for key, value in data.items():
+            station = int(key)
+            stations[station] = None if value is None else int(value)
+        return cls(stations)
+
+
+@dataclass
+class ToolSetup:
+    table: ToolTable
+    turret: Turret
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "tools": self.table.to_json(),
+            "turret": {"stations": self.turret.to_json()},
+        }
+
+    @classmethod
+    def from_json(cls, data: object) -> "ToolSetup":
+        if not isinstance(data, dict):
+            raise ValueError("tool setup must be an object")
+        return cls(
+            table=ToolTable.from_json(data.get("tools", [])),
+            turret=Turret.from_json(data.get("turret", {})),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ToolSetup":
+        return cls.from_json(json.loads(Path(path).expanduser().read_text()))
 
     def save(self, path: str | Path) -> None:
-        Path(path).expanduser().write_text(self.export_linuxcnc())
+        target = Path(path).expanduser()
+        target.write_text(json.dumps(self.to_json(), indent=2, sort_keys=True) + "\n")
 
 
-def parse_linuxcnc_tool_line(line: str, *, line_number: int = 0) -> ToolRecord | None:
-    content, comment = _split_comment(line)
+def sample_tool_records() -> list[ToolRecord]:
+    return [
+        ToolRecord(tool_number=1, description="turning rough/finish"),
+        ToolRecord(tool_number=2, description="centre drill"),
+        ToolRecord(tool_number=3, description="6mm drill"),
+        ToolRecord(tool_number=4, description="boring bar"),
+        ToolRecord(tool_number=5, description="parting tool"),
+        ToolRecord(tool_number=6, description="external thread"),
+        ToolRecord(tool_number=7, description="internal thread"),
+        ToolRecord(tool_number=8, description="spare turret station"),
+        ToolRecord(tool_number=9, description="manual 8mm drill"),
+        ToolRecord(tool_number=10, description="manual 10mm drill"),
+        ToolRecord(tool_number=11, description="manual tap"),
+        ToolRecord(tool_number=12, description="manual special tool"),
+    ]
+
+
+def sample_tool_table() -> ToolTable:
+    return ToolTable(sample_tool_records())
+
+
+def sample_turret() -> Turret:
+    return Turret({station: station for station in range(1, TURRET_STATIONS + 1)})
+
+
+def sample_tool_setup() -> ToolSetup:
+    return ToolSetup(table=sample_tool_table(), turret=sample_turret())
+
+
+def setup_from_legacy_linuxcnc(text: str) -> ToolSetup:
+    setup = sample_tool_setup()
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        record, station = parse_legacy_linuxcnc_tool_line(line, line_number=line_number)
+        if record is None:
+            continue
+        if 1 <= record.tool_number <= MAX_TOOL_NUMBER:
+            setup.table.upsert(record)
+            if station is not None and 1 <= station <= TURRET_STATIONS:
+                setup.turret.assign(record.tool_number, station)
+    return setup
+
+
+def parse_legacy_linuxcnc_tool_line(
+    line: str,
+    *,
+    line_number: int = 0,
+) -> tuple[ToolRecord | None, int | None]:
+    content, description = _split_comment(line)
     content = content.strip()
     if not content:
-        return None
+        return None, None
 
     words: dict[str, float] = {}
     pos = 0
@@ -136,16 +270,14 @@ def parse_linuxcnc_tool_line(line: str, *, line_number: int = 0) -> ToolRecord |
         label = f"line {line_number}: " if line_number else ""
         raise ValueError(f"{label}tool table entry missing T word")
 
-    return ToolRecord(
-        tool_number=int(words["T"]),
-        station=int(words["P"]) if "P" in words else None,
-        x_offset_mm=float(words.get("X", 0.0)),
-        z_offset_mm=float(words.get("Z", 0.0)),
-        diameter_mm=float(words.get("D", 0.0)),
-        front_angle_deg=float(words["I"]) if "I" in words else None,
-        back_angle_deg=float(words["J"]) if "J" in words else None,
-        orientation=int(words["Q"]) if "Q" in words else None,
-        comment=comment.strip(),
+    return (
+        ToolRecord(
+            tool_number=int(words["T"]),
+            x_offset_mm=float(words.get("X", 0.0)),
+            z_offset_mm=float(words.get("Z", 0.0)),
+            description=description.strip(),
+        ),
+        int(words["P"]) if "P" in words else None,
     )
 
 
@@ -156,20 +288,11 @@ def _split_comment(line: str) -> tuple[str, str]:
     return content, comment
 
 
-def sample_tool_table() -> ToolTable:
-    return ToolTable(
-        [
-            ToolRecord(tool_number=1, station=1, comment="turning rough/finish"),
-            ToolRecord(tool_number=2, station=2, diameter_mm=3.0, comment="centre drill"),
-            ToolRecord(tool_number=3, station=3, diameter_mm=6.0, comment="6mm drill"),
-            ToolRecord(tool_number=4, station=4, diameter_mm=10.0, comment="boring bar"),
-            ToolRecord(tool_number=5, station=5, comment="parting tool"),
-            ToolRecord(tool_number=6, station=6, comment="external thread"),
-            ToolRecord(tool_number=7, station=7, comment="internal thread"),
-            ToolRecord(tool_number=8, station=8, comment="spare turret station"),
-            ToolRecord(tool_number=9, diameter_mm=8.0, comment="manual 8mm drill"),
-            ToolRecord(tool_number=10, diameter_mm=10.0, comment="manual 10mm drill"),
-            ToolRecord(tool_number=11, comment="manual tap"),
-            ToolRecord(tool_number=12, comment="manual special tool"),
-        ]
-    )
+def _validate_tool_number(tool_number: int) -> None:
+    if not 1 <= tool_number <= MAX_TOOL_NUMBER:
+        raise ValueError(f"tool number must be in range 1..{MAX_TOOL_NUMBER}")
+
+
+def _validate_station(station: int) -> None:
+    if not 1 <= station <= TURRET_STATIONS:
+        raise ValueError(f"station must be in range 1..{TURRET_STATIONS}")

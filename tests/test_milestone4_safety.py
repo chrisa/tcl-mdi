@@ -57,9 +57,10 @@ def test_thread_sync_move_is_blocked_by_soft_limits():
 
 def test_work_offsets_are_separate_from_tool_offsets():
     service = MachineService(SimBackend(MachineConfig()))
-    service.tool_table.upsert(
-        ToolRecord(tool_number=1, station=1, x_offset_mm=10.0, z_offset_mm=-5.0)
+    service.upsert_tool(
+        ToolRecord(tool_number=1, x_offset_mm=10.0, z_offset_mm=-5.0)
     )
+    assert service.assign_tool_station(1, 1)
     service.confirm_tool_change(1, 1)
 
     service.set_work_position(x_mm=12.5, z_mm=-4.0)
@@ -81,7 +82,8 @@ def test_work_offsets_are_separate_from_tool_offsets():
 
 def test_display_mode_switches_display_coordinate_property():
     service = MachineService(SimBackend(MachineConfig()))
-    service.tool_table.upsert(ToolRecord(tool_number=1, station=1, x_offset_mm=3.0))
+    service.upsert_tool(ToolRecord(tool_number=1, x_offset_mm=3.0))
+    assert service.assign_tool_station(1, 1)
     service.confirm_tool_change(1, 1)
 
     assert service.state.display_x_mm == 3.0

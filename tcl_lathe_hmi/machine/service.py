@@ -15,10 +15,11 @@ from tcl_lathe_hmi.gcode import (
     ThreadSyncAction,
     ToolChangeAction,
 )
-from tcl_lathe_hmi.tools import ToolRecord, ToolTable, sample_tool_table
+from tcl_lathe_hmi.tools import TURRET_STATIONS, ToolManager, ToolRecord, ToolSetup, ToolTable, Turret
 
 from .backend import BackendError, CommandRejectedError, MachineBackend
 from .state import MachineState
+from .toolchanger import ToolChangeCoordinator
 
 
 class MachineService:
@@ -32,11 +33,18 @@ class MachineService:
     ):
         self.config = config or MachineConfig()
         self.settings_path = Path(settings_path).expanduser() if settings_path is not None else None
-        self.tool_table_path = (
+        self.tool_setup_path = (
+            self.settings_path.parent / "tools.json" if self.settings_path is not None else None
+        )
+        legacy_tool_table_path = (
             self.settings_path.parent / "lathe.tbl" if self.settings_path is not None else None
         )
         self.backend = backend
-        self.tool_table = sample_tool_table()
+        self.tools = ToolManager(
+            path=self.tool_setup_path,
+            legacy_path=legacy_tool_table_path,
+        )
+        self.toolchanger = ToolChangeCoordinator(self.tools)
         self.state = MachineState(
             status_message=f"{backend.name}: disconnected",
             soft_limits_enabled=self.config.soft_limits_enabled,
@@ -48,6 +56,14 @@ class MachineService:
         self.load_settings()
         if self.load_tool_table():
             self._refresh_active_tool_offsets_from_table()
+
+    @property
+    def tool_table(self) -> ToolTable:
+        return self.tools.tool_table
+
+    @property
+    def turret(self) -> Turret:
+        return self.tools.turret
 
     def set_backend(self, backend: MachineBackend) -> MachineState:
         try:
@@ -282,26 +298,28 @@ class MachineService:
         if tool_number is None:
             self._mark_rejected(f"Line {action.line_number}: tool change missing T word")
             return False
-        requested_station = action.turret_station
-        tool = self.tool_table.ensure_tool(
-            tool_number,
-            requested_station if self._is_turret_station(requested_station) else None,
-        )
-        station = requested_station if requested_station is not None else tool.station
-        if not self._is_turret_station(station):
+
+        try:
+            resolution = self.toolchanger.resolve_request(
+                tool_number=tool_number,
+                requested_station=action.turret_station,
+                context=f"Line {action.line_number}",
+            )
+        except ValueError as exc:
+            self._mark_rejected(f"Line {action.line_number}: {exc}")
+            return False
+
+        if resolution.manual_required:
             self._mark_pending_tool(
-                tool.tool_number,
-                station,
-                (
-                    f"Line {action.line_number}: T{tool.tool_number} is not assigned "
-                    "to turret station 1..8; confirm manual tool change"
-                ),
+                resolution.tool.tool_number,
+                resolution.station,
+                resolution.message,
             )
             return False
         if self.state.turret_station is not None:
             return self.change_tool(
-                tool.tool_number,
-                station=station,
+                resolution.tool.tool_number,
+                station=resolution.station,
                 context=f"Line {action.line_number}",
             )
         self._mark_rejected(
@@ -319,16 +337,15 @@ class MachineService:
         if selected_tool is None:
             self._mark_rejected("No pending tool change to confirm")
             return False
-        tool = self.tool_table.ensure_tool(
-            selected_tool,
-            station if self._is_turret_station(station) else None,
-        )
-        active_station = (
-            station
-            if self._is_turret_station(station)
-            else (tool.station if self._is_turret_station(tool.station) else None)
-        )
-        self._apply_active_tool(tool, active_station)
+        try:
+            resolution = self.toolchanger.resolve_confirmation(
+                tool_number=selected_tool,
+                station=station,
+            )
+        except ValueError as exc:
+            self._mark_rejected(str(exc))
+            return False
+        self._apply_active_tool(resolution)
         return True
 
     def change_tool(
@@ -341,19 +358,22 @@ class MachineService:
         if not self.state.can_accept_commands:
             self._mark_rejected("Machine is not ready for toolchanger command")
             return False
-        tool = self.tool_table.ensure_tool(
-            tool_number,
-            station if self._is_turret_station(station) else None,
-        )
-        target_station = station if station is not None else tool.station
-        if not self._is_turret_station(target_station):
+
+        try:
+            resolution = self.toolchanger.resolve_request(
+                tool_number=tool_number,
+                requested_station=station,
+                context=context,
+            )
+        except ValueError as exc:
+            self._mark_rejected(f"{context}: {exc}")
+            return False
+
+        if resolution.manual_required:
             self._mark_pending_tool(
-                tool.tool_number,
-                target_station,
-                (
-                    f"{context}: T{tool.tool_number} is not assigned to turret station 1..8; "
-                    "confirm manual tool change"
-                ),
+                resolution.tool.tool_number,
+                resolution.station,
+                resolution.message,
             )
             return False
         current_station = self.state.turret_station
@@ -365,6 +385,7 @@ class MachineService:
             return False
         if not self._valid_station(current_station, "current station"):
             return False
+        target_station = resolution.station
         assert target_station is not None
 
         try:
@@ -373,7 +394,7 @@ class MachineService:
                 target_station=target_station,
                 slew=self.config.jog_slew,
             )
-            self._apply_active_tool(tool, target_station)
+            self._apply_active_tool(resolution)
             self.state = self._merge_tool_state(self.backend.poll())
             self.save_settings()
             return True
@@ -404,32 +425,120 @@ class MachineService:
         if tool is None:
             self._mark_rejected(f"T{tool_number} is not in the tool table")
             return False
-        return self.confirm_tool_change(tool.tool_number, tool.station)
+        return self.confirm_tool_change(tool.tool_number, self.station_for_tool(tool.tool_number))
 
     def upsert_tool(self, tool: ToolRecord) -> bool:
-        self.tool_table.upsert(tool)
-        if tool.tool_number == self.state.active_tool:
-            self._apply_active_tool(
-                tool,
-                tool.station if self._is_turret_station(tool.station) else None,
-            )
-        if not self.save_tool_table():
+        try:
+            saved = self.tools.upsert_tool(tool)
+        except (OSError, ValueError) as exc:
+            self._mark_rejected(f"Could not save {tool.display_name}: {exc}")
             return False
-        self.state = replace(self.state, status_message=f"Saved {tool.display_name}")
+        self._refresh_active_tool_offsets_from_table()
+        self.state = replace(self.state, status_message=f"Saved {saved.display_name}")
         return True
 
     def update_tool_table(self, table: ToolTable) -> None:
-        self.tool_table = table
-        active = self.tool_table.get(self.state.active_tool)
-        if active is not None:
-            self.state = replace(
-                self.state,
-                turret_station=active.station,
-                tool_x_offset_mm=active.x_offset_mm,
-                tool_z_offset_mm=active.z_offset_mm,
-            )
-            self.save_settings()
+        self.tools.setup = ToolSetup(table=table, turret=self.turret)
+        self._refresh_active_tool_offsets_from_table()
         self.save_tool_table()
+
+    def update_tool(
+        self,
+        tool_number: int,
+        *,
+        station: int | None,
+        x_offset_mm: float,
+        z_offset_mm: float,
+        description: str,
+    ) -> bool:
+        try:
+            tool = self.tools.update_tool(
+                tool_number,
+                station=station,
+                x_offset_mm=x_offset_mm,
+                z_offset_mm=z_offset_mm,
+                description=description,
+            )
+        except (OSError, ValueError) as exc:
+            self._mark_rejected(f"Could not update T{tool_number}: {exc}")
+            return False
+        self._refresh_active_tool_offsets_from_table()
+        self.save_settings()
+        station_label = self.station_for_tool(tool_number)
+        self.state = replace(
+            self.state,
+            status_message=(
+                f"Saved T{tool.tool_number}"
+                + (f" P{station_label}" if station_label is not None else "")
+            ),
+        )
+        return True
+
+    def assign_tool_station(self, tool_number: int, station: int | None) -> bool:
+        try:
+            self.tools.assign_tool_station(tool_number, station)
+        except (OSError, ValueError) as exc:
+            self._mark_rejected(f"Could not assign T{tool_number}: {exc}")
+            return False
+        self._refresh_active_tool_offsets_from_table()
+        self.save_settings()
+        self.state = replace(
+            self.state,
+            status_message=(
+                f"T{tool_number} cleared from turret"
+                if station is None
+                else f"T{tool_number} assigned to P{station}"
+            ),
+        )
+        return True
+
+    def set_tool_offsets(
+        self,
+        tool_number: int,
+        *,
+        x_offset_mm: float | None = None,
+        z_offset_mm: float | None = None,
+    ) -> bool:
+        try:
+            tool = self.tools.set_tool_offsets(
+                tool_number,
+                x_offset_mm=x_offset_mm,
+                z_offset_mm=z_offset_mm,
+            )
+        except (OSError, ValueError) as exc:
+            self._mark_rejected(f"Could not update T{tool_number} offsets: {exc}")
+            return False
+        self._refresh_active_tool_offsets_from_table()
+        self.save_settings()
+        self.state = replace(
+            self.state,
+            status_message=(
+                f"T{tool.tool_number} offsets saved: "
+                f"X {tool.x_offset_mm:+0.3f} Z {tool.z_offset_mm:+0.3f}"
+            ),
+        )
+        return True
+
+    def update_tool_description(self, tool_number: int, description: str) -> bool:
+        try:
+            self.tools.update_tool_description(tool_number, description)
+        except (OSError, ValueError) as exc:
+            self._mark_rejected(f"Could not update T{tool_number} description: {exc}")
+            return False
+        self.state = replace(self.state, status_message=f"T{tool_number} description saved")
+        return True
+
+    def station_for_tool(self, tool_number: int) -> int | None:
+        try:
+            return self.tools.station_for_tool(tool_number)
+        except ValueError:
+            return None
+
+    def tool_for_station(self, station: int) -> int | None:
+        try:
+            return self.tools.tool_for_station(station)
+        except ValueError:
+            return None
 
     def teach_tool_z(self, known_z_mm: float = 0.0, tool_number: int | None = None) -> bool:
         selected_tool = self._selected_tool_number(tool_number)
@@ -571,29 +680,25 @@ class MachineService:
             self.state = replace(self.state, **kwargs)
 
     def load_tool_table(self) -> bool:
-        if self.tool_table_path is None or not self.tool_table_path.exists():
-            return False
         try:
-            self.tool_table = ToolTable.load(self.tool_table_path)
-            return True
+            return self.tools.load()
         except (OSError, ValueError) as exc:
+            path = self.tool_setup_path or "tool setup"
             self.state = replace(
                 self.state,
-                status_message=f"Could not load tool table from {self.tool_table_path}: {exc}",
+                status_message=f"Could not load tool setup from {path}: {exc}",
             )
             return False
 
     def save_tool_table(self) -> bool:
-        if self.tool_table_path is None:
-            return True
         try:
-            self.tool_table_path.parent.mkdir(parents=True, exist_ok=True)
-            self.tool_table.save(self.tool_table_path)
+            self.tools.save()
             return True
-        except OSError:
+        except OSError as exc:
+            path = self.tool_setup_path or "tool setup"
             self.state = replace(
                 self.state,
-                status_message=f"Could not save tool table to {self.tool_table_path}",
+                status_message=f"Could not save tool setup to {path}: {exc}",
             )
             return False
 
@@ -713,34 +818,10 @@ class MachineService:
         )
 
     def _refresh_active_tool_offsets_from_table(self) -> None:
-        active = self.tool_table.get(self.state.active_tool)
-        if active is None:
-            return
-        self.state = replace(
-            self.state,
-            turret_station=(
-                active.station
-                if self._is_turret_station(active.station)
-                else self.state.turret_station
-            ),
-            tool_x_offset_mm=active.x_offset_mm,
-            tool_z_offset_mm=active.z_offset_mm,
-        )
+        self.state = self.toolchanger.refresh_active_tool_state(self.state)
 
-    def _apply_active_tool(self, tool: ToolRecord, station: int | None) -> None:
-        self.state = replace(
-            self.state,
-            active_tool=tool.tool_number,
-            turret_station=station,
-            tool_x_offset_mm=tool.x_offset_mm,
-            tool_z_offset_mm=tool.z_offset_mm,
-            pending_tool=None,
-            pending_turret_station=None,
-            status_message=(
-                f"Active tool T{tool.tool_number}"
-                + (f" station {station}" if station is not None else "")
-            ),
-        )
+    def _apply_active_tool(self, resolution) -> None:
+        self.state = self.toolchanger.apply_active_tool(self.state, resolution)
         self.save_settings()
 
     def _selected_tool_number(self, tool_number: int | None) -> int | None:
@@ -757,21 +838,16 @@ class MachineService:
         x_offset_mm: float | None = None,
         z_offset_mm: float | None = None,
     ) -> bool:
-        tool = self.tool_table.ensure_tool(tool_number)
-        updated = replace(
-            tool,
-            x_offset_mm=tool.x_offset_mm if x_offset_mm is None else x_offset_mm,
-            z_offset_mm=tool.z_offset_mm if z_offset_mm is None else z_offset_mm,
-        )
-        self.tool_table.upsert(updated)
-        if tool_number == self.state.active_tool:
-            self.state = replace(
-                self.state,
-                tool_x_offset_mm=updated.x_offset_mm,
-                tool_z_offset_mm=updated.z_offset_mm,
+        try:
+            updated = self.tools.set_tool_offsets(
+                tool_number,
+                x_offset_mm=x_offset_mm,
+                z_offset_mm=z_offset_mm,
             )
-        if not self.save_tool_table():
+        except (OSError, ValueError) as exc:
+            self._mark_rejected(f"Could not teach T{tool_number}: {exc}")
             return False
+        self._refresh_active_tool_offsets_from_table()
         self.save_settings()
         axis = "X" if x_offset_mm is not None else "Z"
         self.state = replace(
@@ -797,11 +873,11 @@ class MachineService:
         )
 
     def _valid_station(self, station: int, label: str) -> bool:
-        if not 1 <= station <= 8:
-            self._mark_rejected(f"{label} must be in range 1..8")
+        if not 1 <= station <= TURRET_STATIONS:
+            self._mark_rejected(f"{label} must be in range 1..{TURRET_STATIONS}")
             return False
         return True
 
     @staticmethod
     def _is_turret_station(station: int | None) -> bool:
-        return station is not None and 1 <= station <= 8
+        return station is not None and 1 <= station <= TURRET_STATIONS

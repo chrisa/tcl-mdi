@@ -1,65 +1,101 @@
 from __future__ import annotations
 
-from tcl_lathe_hmi.tools import ToolRecord, ToolTable, sample_tool_table
+import json
+
+from tcl_lathe_hmi.tools import (
+    ToolManager,
+    ToolRecord,
+    ToolSetup,
+    sample_tool_setup,
+    sample_tool_table,
+    sample_turret,
+)
+from tcl_lathe_hmi.tools.table import setup_from_legacy_linuxcnc
 
 
-def test_import_linuxcnc_tool_table_keeps_tool_and_station_separate():
-    table = ToolTable.from_linuxcnc(
+def test_sample_tool_setup_has_twelve_tools_and_eight_turret_stations():
+    setup = sample_tool_setup()
+
+    assert [tool.tool_number for tool in setup.table.tools] == list(range(1, 13))
+    assert [setup.turret.station_for_tool(tool_number) for tool_number in range(1, 9)] == list(
+        range(1, 9)
+    )
+    assert [setup.turret.station_for_tool(tool_number) for tool_number in range(9, 13)] == [
+        None
+    ] * 4
+
+
+def test_tool_setup_json_round_trips_offsets_descriptions_and_turret_assignments(tmp_path):
+    path = tmp_path / "tools.json"
+    setup = ToolSetup(table=sample_tool_table(), turret=sample_turret())
+    setup.table.upsert(
+        ToolRecord(
+            tool_number=4,
+            x_offset_mm=-1.25,
+            z_offset_mm=3.5,
+            description="boring bar",
+        )
+    )
+    setup.turret.assign(4, 2)
+
+    setup.save(path)
+    restored = ToolSetup.load(path)
+
+    assert json.loads(path.read_text())["version"] == 1
+    assert restored.table.get(4) == ToolRecord(
+        tool_number=4,
+        x_offset_mm=-1.25,
+        z_offset_mm=3.5,
+        description="boring bar",
+    )
+    assert restored.turret.station_for_tool(4) == 2
+    assert restored.turret.tool_for_station(2) == 4
+
+
+def test_turret_assignment_keeps_one_tool_per_station():
+    turret = sample_turret()
+
+    turret.assign(4, 2)
+
+    assert turret.station_for_tool(2) is None
+    assert turret.station_for_tool(4) == 2
+    assert turret.tool_for_station(4) is None
+    assert turret.tool_for_station(2) == 4
+
+
+def test_tool_manager_saves_assignment_and_offset_edits(tmp_path):
+    path = tmp_path / "tools.json"
+    manager = ToolManager(path=path)
+
+    manager.update_tool(
+        4,
+        station=2,
+        x_offset_mm=-0.1,
+        z_offset_mm=1.25,
+        description="finish",
+    )
+
+    restored = ToolManager(path=path)
+    assert restored.load()
+    assert restored.get_tool(4) == ToolRecord(
+        tool_number=4,
+        x_offset_mm=-0.1,
+        z_offset_mm=1.25,
+        description="finish",
+    )
+    assert restored.station_for_tool(4) == 2
+
+
+def test_legacy_linuxcnc_table_migrates_core_tool_setup():
+    setup = setup_from_legacy_linuxcnc(
         "T4 P2 X-1.25 Y0.0 Z3.5 A0.0 B0.0 C0.0 U0.0 V0.0 W0.0 "
         "D0.4 I94.0 J154.0 Q1.0 ;boring bar\n"
     )
 
-    tool = table.get(4)
-
-    assert tool is not None
-    assert tool.tool_number == 4
-    assert tool.station == 2
-    assert tool.x_offset_mm == -1.25
-    assert tool.z_offset_mm == 3.5
-    assert tool.diameter_mm == 0.4
-    assert tool.front_angle_deg == 94.0
-    assert tool.back_angle_deg == 154.0
-    assert tool.orientation == 1
-    assert tool.comment == "boring bar"
-
-
-def test_export_linuxcnc_tool_table_is_reimportable():
-    table = ToolTable(
-        [
-            ToolRecord(
-                tool_number=2,
-                station=5,
-                x_offset_mm=-0.1,
-                z_offset_mm=1.25,
-                diameter_mm=0.2,
-                comment="finish",
-            )
-        ]
+    assert setup.table.get(4) == ToolRecord(
+        tool_number=4,
+        x_offset_mm=-1.25,
+        z_offset_mm=3.5,
+        description="boring bar",
     )
-
-    exported = table.export_linuxcnc()
-    imported = ToolTable.from_linuxcnc(exported)
-
-    assert imported.get(2) == table.get(2)
-
-
-def test_export_preserves_tools_without_turret_station():
-    table = ToolTable([ToolRecord(tool_number=9, station=None, comment="manual drill")])
-
-    exported = table.export_linuxcnc()
-    imported = ToolTable.from_linuxcnc(exported)
-
-    assert "P9" not in exported
-    assert imported.get(9) == table.get(9)
-
-
-def test_sample_tool_table_has_twelve_tools_and_eight_turret_stations():
-    table = sample_tool_table()
-    turret_tools = [table.get(tool_number) for tool_number in range(1, 9)]
-    manual_tools = [table.get(tool_number) for tool_number in range(9, 13)]
-
-    assert [tool.tool_number for tool in table.tools] == list(range(1, 13))
-    assert all(tool is not None for tool in turret_tools)
-    assert all(tool is not None for tool in manual_tools)
-    assert [tool.station for tool in turret_tools if tool is not None] == list(range(1, 9))
-    assert [tool.station for tool in manual_tools if tool is not None] == [None] * 4
+    assert setup.turret.station_for_tool(4) == 2

@@ -48,9 +48,10 @@ def test_service_persists_turret_station_and_active_tool_offsets(tmp_path):
         SimBackend(MachineConfig()),
         settings_path=settings_path,
     )
-    service.tool_table.upsert(
-        ToolRecord(tool_number=3, station=5, x_offset_mm=1.25, z_offset_mm=-0.5)
+    service.upsert_tool(
+        ToolRecord(tool_number=3, x_offset_mm=1.25, z_offset_mm=-0.5)
     )
+    assert service.assign_tool_station(3, 5)
 
     assert service.set_turret_station(5)
     assert service.confirm_tool_change(3, 5)

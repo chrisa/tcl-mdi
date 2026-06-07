@@ -91,7 +91,7 @@ def test_service_rejects_automatic_tool_change_when_current_station_unknown():
     service = MachineService(SimBackend(MachineConfig()))
     service.connect()
 
-    action = ToolChangeAction(line_number=5, tool_number=4, turret_station=2)
+    action = ToolChangeAction(line_number=5, tool_number=4, turret_station=4)
 
     assert not service.execute_action(action)
     assert service.state.pending_tool is None
@@ -103,9 +103,10 @@ def test_service_executes_tool_change_when_current_station_known():
     config = MachineConfig(sim_tool_change_time_s=0.01)
     service = MachineService(SimBackend(config))
     service.connect()
-    service.tool_table.upsert(
-        ToolRecord(tool_number=4, station=2, x_offset_mm=-1.0, z_offset_mm=2.5)
+    service.upsert_tool(
+        ToolRecord(tool_number=4, x_offset_mm=-1.0, z_offset_mm=2.5)
     )
+    assert service.assign_tool_station(4, 2)
     assert service.set_turret_station(1)
 
     action = ToolChangeAction(line_number=5, tool_number=4, turret_station=2)
@@ -171,9 +172,10 @@ def test_service_marks_out_of_range_station_pending_for_manual_confirmation():
 
 def test_confirm_tool_change_applies_active_offsets():
     service = MachineService(SimBackend(MachineConfig()))
-    service.tool_table.upsert(
-        ToolRecord(tool_number=4, station=2, x_offset_mm=-1.0, z_offset_mm=2.5)
+    service.upsert_tool(
+        ToolRecord(tool_number=4, x_offset_mm=-1.0, z_offset_mm=2.5)
     )
+    assert service.assign_tool_station(4, 2)
 
     assert service.confirm_tool_change(4, 2)
 
@@ -189,9 +191,10 @@ def test_move_action_uses_work_coordinates_with_tool_offsets():
     config = MachineConfig(sim_motion_time_s=0.01)
     service = MachineService(SimBackend(config))
     service.connect()
-    service.tool_table.upsert(
-        ToolRecord(tool_number=1, station=1, x_offset_mm=10.0, z_offset_mm=-5.0)
+    service.upsert_tool(
+        ToolRecord(tool_number=1, x_offset_mm=10.0, z_offset_mm=-5.0)
     )
+    assert service.assign_tool_station(1, 1)
     service.confirm_tool_change(1, 1)
 
     action = MoveAction(

@@ -717,7 +717,7 @@ class ManualPanel(BoxLayout):
     def _sync_tools_panel_from_service(self) -> None:
         if self.tools_panel is None:
             return
-        self.tools_panel._export_to_editor()
+        self.tools_panel.refresh_tools(load_fields=True)
         self.tools_panel._load_tool_fields(self.service.state.active_tool)
         self.tools_panel.refresh(self.service.state)
 

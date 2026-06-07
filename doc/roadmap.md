@@ -235,8 +235,9 @@ Goal: manage tool offsets and prepare for automatic turret control.
 Features:
 
 - Tool table screen.
-- Import/export LinuxCNC-style tool table rows similar to the existing `lathe.tbl`.
-- Store logical tool number separately from physical turret station.
+- Store the app-native tool setup in JSON, with best-effort migration from any
+  existing `lathe.tbl`.
+- Store logical tool number separately from physical turret station assignment.
 - Manage X/Z offsets per tool.
 - Select active tool.
 - Apply active tool offsets to work-coordinate display and g-code execution.
@@ -341,7 +342,7 @@ Milestone 2:
 
 Milestone 3:
 
-- Unit-test tool table import/export.
+- Unit-test native tool setup JSON round-trips and legacy `lathe.tbl` migration.
 - Unit-test offset application.
 - Unit-test logical tool vs turret station behavior.
 

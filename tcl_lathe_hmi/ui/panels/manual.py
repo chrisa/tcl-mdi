@@ -139,8 +139,8 @@ class ManualPanel(BoxLayout):
         panel = BoxLayout(orientation="vertical", spacing=10)
         paint(panel, PANEL)
         panel.add_widget(self._build_jog_settings())
-        panel.add_widget(self._build_toolchanger_controls())
         panel.add_widget(self._build_jog_buttons())
+        panel.add_widget(self._build_toolchanger_controls())
         return panel
 
     def _build_status_bar(self, initial_backend: str) -> BoxLayout:
@@ -246,16 +246,14 @@ class ManualPanel(BoxLayout):
             self.jog_increment_buttons.append(btn)
             self.command_widgets.append(btn)
             increments.add_widget(btn)
-        box.add_widget(increments)
 
-        custom_row = BoxLayout(orientation="horizontal", spacing=8)
         self.custom_increment_button = toggle_button("Custom", group="jog_increment")
         bind_release(self.custom_increment_button, self._set_custom_increment)
         self.custom_increment_button.bind(state=lambda button, _state: self._style_toggle(button))
         self._style_toggle(self.custom_increment_button)
         self.jog_increment_buttons.append(self.custom_increment_button)
         self.command_widgets.append(self.custom_increment_button)
-        custom_row.add_widget(self.custom_increment_button)
+        increments.add_widget(self.custom_increment_button)
 
         self.custom_increment_input = numeric_input(
             f"{self.custom_increment_mm:0.3f}",
@@ -264,9 +262,10 @@ class ManualPanel(BoxLayout):
             on_value=self._custom_increment_changed,
         )
         self.command_widgets.append(self.custom_increment_input)
-        custom_row.add_widget(Label(text="mm", color=MUTED, font_size=24, size_hint_x=None, width=48))
-        custom_row.add_widget(self.custom_increment_input)
-        box.add_widget(custom_row)
+        increments.add_widget(self.custom_increment_input)
+        increments.add_widget(Label(text="mm", color=MUTED, font_size=24, size_hint_x=None, width=48))
+
+        box.add_widget(increments)
 
         row = BoxLayout(orientation="horizontal", spacing=8)
         feed = toggle_button("Feed", group="jog_mode")
@@ -280,8 +279,8 @@ class ManualPanel(BoxLayout):
         self._style_toggle(feed)
         self._style_toggle(rapid)
         self.command_widgets.extend([feed, rapid])
-        row.add_widget(feed)
         row.add_widget(rapid)
+        row.add_widget(feed)
 
         self.feed_input = numeric_input(
             str(self.config.jog_feed),

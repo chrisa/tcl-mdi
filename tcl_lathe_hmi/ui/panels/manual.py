@@ -36,7 +36,7 @@ from tcl_lathe_hmi.ui.controls import (
     toggle_button,
 )
 from tcl_lathe_hmi.ui.dro import MachineReadouts
-from tcl_lathe_hmi.ui.form_values import optional_int, parse_number
+from tcl_lathe_hmi.ui.form_values import parse_number
 from tcl_lathe_hmi.ui.jog_queue import JogQueueBar
 from tcl_lathe_hmi.ui.keypad import NumberEntryButton
 from tcl_lathe_hmi.ui.panels.cam import CamPanel
@@ -60,6 +60,10 @@ class ManualPanel(BoxLayout):
         self.service = service
         self.config = config
         self.on_backend_change = on_backend_change
+        self.selected_tool_position: int | None = None
+        self.tool_position_buttons: dict[int, Button] = {}
+        self.manual_set_current_button: Button | None = None
+        self.manual_change_button: Button | None = None
         self.increment_mm = JOG_INCREMENTS_MM[1]
         self.custom_increment_mm = self.increment_mm
         self.use_custom_increment = False
@@ -87,6 +91,11 @@ class ManualPanel(BoxLayout):
         self._status_flash_event = None
         self._status_flash_phase = 0
         self._status_flash_active = False
+        self._tool_button_flash_event = None
+        self._tool_button_flash_phase = 0
+        self._tool_button_flash_station: int | None = None
+        self._tool_button_flash_action: str | None = None
+        self._tool_button_flash_ticks_remaining = 0
 
         paint(self, BG)
         self._build(initial_backend)
@@ -100,6 +109,9 @@ class ManualPanel(BoxLayout):
             self._status_flash_event.cancel()
             self._status_flash_event = None
         self._status_flash_active = False
+        if self._tool_button_flash_event is not None:
+            self._tool_button_flash_event.cancel()
+            self._tool_button_flash_event = None
 
     def _build(self, initial_backend: str) -> None:
         self.add_widget(self._build_status_bar(initial_backend))
@@ -349,29 +361,23 @@ class ManualPanel(BoxLayout):
         )
         box.add_widget(self.manual_tool_status)
 
-        fields = GridLayout(cols=6, spacing=6, size_hint_y=None, height=46)
-        self.manual_current_station_input = field_input("1", integer=True, title_text="Current Station")
-        self.manual_tool_input = field_input("1", integer=True, title_text="Tool Number")
-        self.manual_target_station_input = field_input("1", integer=True, title_text="Target Station")
-        for label, widget in (
-            ("Now P", self.manual_current_station_input),
-            ("Tool T", self.manual_tool_input),
-            ("Go P", self.manual_target_station_input),
-        ):
-            fields.add_widget(Label(text=label, color=MUTED, font_size=18))
-            fields.add_widget(widget)
+        fields = GridLayout(cols=8, spacing=6, size_hint_y=None, height=46)
+
+        for pos in range(1, 9):
+            pos_select = action_button(f"P{pos}", BLUE)
+            bind_release(pos_select, lambda b, i=pos: self._manual_select_position(b, i))
+            self.tool_position_buttons[pos] = pos_select
+            self.command_widgets.append(pos_select)
+            fields.add_widget(pos_select)
         box.add_widget(fields)
 
         row = BoxLayout(orientation="horizontal", spacing=8)
-        set_current = action_button("Set Current", BLUE)
-        change = action_button("Change", GREEN)
-        confirm = action_button("Confirm", AMBER)
-        bind_release(set_current, lambda *_: self._manual_set_current_station())
-        bind_release(change, lambda *_: self._manual_change_tool())
-        bind_release(confirm, lambda *_: self._manual_confirm_pending_tool())
-        row.add_widget(set_current)
-        row.add_widget(change)
-        row.add_widget(confirm)
+        self.manual_set_current_button = action_button("Set Current", BLUE)
+        self.manual_change_button = action_button("Change", GREEN)
+        bind_release(self.manual_set_current_button, lambda *_: self._manual_set_current_station())
+        bind_release(self.manual_change_button, lambda *_: self._manual_change_tool())
+        row.add_widget(self.manual_set_current_button)
+        row.add_widget(self.manual_change_button)
         box.add_widget(row)
 
         teach_row = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=58)
@@ -387,13 +393,9 @@ class ManualPanel(BoxLayout):
 
         self.command_widgets.extend(
             [
-                self.manual_current_station_input,
-                self.manual_tool_input,
-                self.manual_target_station_input,
                 self.manual_teach_diameter_input,
-                set_current,
-                change,
-                confirm,
+                self.manual_set_current_button,
+                self.manual_change_button,
                 teach_z,
                 teach_x,
             ]
@@ -478,6 +480,7 @@ class ManualPanel(BoxLayout):
                 f"Xoff {state.tool_x_offset_mm:+0.3f}  Zoff {state.tool_z_offset_mm:+0.3f}"
                 f"{pending_text}"
             )
+            self._refresh_manual_toolchanger_buttons(state)
         self.home_label.text = f"HOME {'X' if state.homed_x else '-'}{'Z' if state.homed_z else '-'}"
         self.home_label.color = GREEN if state.homed_x and state.homed_z else MUTED
 
@@ -667,41 +670,59 @@ class ManualPanel(BoxLayout):
             self._set_status(self.service.state.status_message, flash=True)
         self.refresh(self.service.state)
 
-    def _manual_set_current_station(self) -> None:
-        try:
-            station = optional_int(self.manual_current_station_input.text)
-        except ValueError:
-            self._set_status("Invalid current turret station", flash=True)
+    def _manual_select_position(self, button: Button, pos: int) -> None:
+        if not 1 <= pos <= 8:
             return
+        if self._tool_button_flash_station is not None:
+            self._stop_manual_tool_button_flash(clear_selection=False)
+        self.selected_tool_position = pos
+        self.refresh(self.service.state)
+
+    def _manual_set_current_station(self) -> None:
+        if self.selected_tool_position is None:
+            self._set_status("Select a turret station first", flash=True)
+            return
+        station = self.selected_tool_position
         ok = self.service.set_turret_station(station)
         self._set_status(self.service.state.status_message, flash=not ok)
+        if ok:
+            self._start_manual_tool_button_flash(station=station, action="set_current", ticks=4)
+            self._sync_tools_panel_from_service()
 
     def _manual_change_tool(self) -> None:
-        try:
-            tool_number = int(parse_number(self.manual_tool_input.text, -1))
-            target_station = optional_int(self.manual_target_station_input.text)
-        except ValueError:
-            self._set_status("Invalid toolchanger input", flash=True)
+        if self.selected_tool_position is None:
+            self._set_status("Select a turret station first", flash=True)
             return
-        if tool_number < 0:
-            self._set_status("Tool number must be non-negative", flash=True)
+        station = self.selected_tool_position
+        tool_number = self.service.tool_for_station(station)
+        if tool_number is None:
+            self._set_status(
+                f"No tool is assigned to P{station}; use Set Current or assign it on the Tools tab",
+                flash=True,
+            )
             return
+
+        pending_tool = self.service.state.pending_tool
+        pending_station = self.service.state.pending_turret_station
         ok = self.service.change_tool(
             tool_number,
-            station=target_station,
+            station=station,
             context="Manual toolchanger",
         )
+        if ok and pending_tool is not None:
+            self.service.state = replace(
+                self.service.state,
+                pending_tool=pending_tool,
+                pending_turret_station=pending_station,
+            )
         self._set_status(self.service.state.status_message, flash=not ok)
-        self._sync_tools_panel_from_service()
-
-    def _manual_confirm_pending_tool(self) -> None:
-        state = self.service.state
-        if state.pending_tool is None:
-            self._set_status("No pending tool change", flash=True)
-            return
-        ok = self.service.confirm_tool_change(state.pending_tool, state.pending_turret_station)
-        self._set_status(self.service.state.status_message, flash=not ok)
-        self._sync_tools_panel_from_service()
+        if ok:
+            self._start_manual_tool_button_flash(
+                station=station,
+                action="change",
+                ticks=0,
+            )
+            self._sync_tools_panel_from_service()
 
     def _manual_teach_z0(self) -> None:
         ok = self.service.teach_tool_z(0.0)
@@ -726,6 +747,89 @@ class ManualPanel(BoxLayout):
         if flash:
             self._flash_status_indicator()
         self.refresh(self.service.state)
+
+    def _refresh_manual_toolchanger_buttons(self, state: MachineState) -> None:
+        flash_station = self._tool_button_flash_station
+        flash_phase = self._tool_button_flash_phase
+        for station, button in self.tool_position_buttons.items():
+            button.background_color = self._manual_tool_button_color(
+                state,
+                station,
+                flashing=flash_station == station,
+                flash_phase=flash_phase,
+            )
+
+        if self.manual_set_current_button is not None:
+            self.manual_set_current_button.disabled = False
+        if self.manual_change_button is not None:
+            self.manual_change_button.disabled = False
+
+    def _manual_tool_button_color(
+        self,
+        state: MachineState,
+        station: int,
+        *,
+        flashing: bool,
+        flash_phase: int,
+    ):
+        if flashing:
+            return AMBER if flash_phase % 2 == 0 else BLUE
+        if self.selected_tool_position == station:
+            return AMBER
+        if state.turret_station == station:
+            return GREEN
+        if (
+            self.selected_tool_position is None
+            and state.pending_tool is not None
+            and state.pending_turret_station == station
+        ):
+            return AMBER
+        return BLUE
+
+    def _start_manual_tool_button_flash(
+        self,
+        *,
+        station: int,
+        action: str,
+        ticks: int,
+    ) -> None:
+        if self._tool_button_flash_event is not None:
+            self._tool_button_flash_event.cancel()
+        self._tool_button_flash_station = station
+        self._tool_button_flash_action = action
+        self._tool_button_flash_ticks_remaining = ticks
+        self._tool_button_flash_phase = 0
+        self._tool_button_flash_event = Clock.schedule_interval(
+            self._manual_tool_button_flash_tick,
+            0.15,
+        )
+        self._refresh_manual_toolchanger_buttons(self.service.state)
+
+    def _manual_tool_button_flash_tick(self, _dt):
+        self._tool_button_flash_phase += 1
+        if self._tool_button_flash_action == "change":
+            if not self.service.state.busy:
+                self._stop_manual_tool_button_flash(clear_selection=True)
+                return False
+        elif self._tool_button_flash_ticks_remaining > 0:
+            self._tool_button_flash_ticks_remaining -= 1
+        else:
+            self._stop_manual_tool_button_flash(clear_selection=True)
+            return False
+        self._refresh_manual_toolchanger_buttons(self.service.state)
+        return True
+
+    def _stop_manual_tool_button_flash(self, *, clear_selection: bool) -> None:
+        if self._tool_button_flash_event is not None:
+            self._tool_button_flash_event.cancel()
+            self._tool_button_flash_event = None
+        self._tool_button_flash_phase = 0
+        self._tool_button_flash_station = None
+        self._tool_button_flash_action = None
+        self._tool_button_flash_ticks_remaining = 0
+        if clear_selection:
+            self.selected_tool_position = None
+        self._refresh_manual_toolchanger_buttons(self.service.state)
 
     def _clear_queued_jog(self) -> None:
         self.queued_jog_x_mm = 0.0

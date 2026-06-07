@@ -12,7 +12,9 @@ from kivy.clock import Clock
 
 from tcl_lathe_hmi.backends.sim import SimBackend
 from tcl_lathe_hmi.config import MachineConfig
+from tcl_lathe_hmi.gcode import ToolChangeAction
 from tcl_lathe_hmi.machine.service import MachineService
+from tcl_lathe_hmi.tools import ToolRecord
 from tcl_lathe_hmi.ui.widgets import bind_release
 
 pytest.importorskip("kivy")
@@ -22,8 +24,8 @@ from tcl_lathe_hmi.ui.app import ManualPanel, action_button, toggle_button
 from tcl_lathe_hmi.ui.keypad import NumberEntryButton
 
 
-def _manual_panel(tmp_path: Path) -> ManualPanel:
-    config = MachineConfig()
+def _manual_panel(tmp_path: Path, *, config: MachineConfig | None = None) -> ManualPanel:
+    config = config or MachineConfig()
     service = MachineService(
         SimBackend(config),
         config=config,
@@ -206,4 +208,77 @@ def test_custom_jog_distance_selects_only_custom_button(tmp_path: Path):
     assert panel.custom_increment_mm == pytest.approx(0.25)
     assert panel.custom_increment_button.state == "down"
     assert all(button.state == "normal" for button in fixed_buttons)
+    panel.cancel_scheduled_events()
+
+
+def test_manual_toolchanger_set_current_flashes_then_syncs_green(tmp_path: Path):
+    panel = _manual_panel(tmp_path)
+    p3 = panel.tool_position_buttons[3]
+
+    panel._manual_select_position(p3, 3)
+    assert p3.background_color == list(app_module.AMBER)
+
+    panel._manual_set_current_station()
+
+    assert panel.service.state.turret_station == 3
+    assert panel._tool_button_flash_station == 3
+    assert p3.background_color == list(app_module.AMBER)
+
+    while panel._manual_tool_button_flash_tick(0):
+        pass
+
+    assert panel.selected_tool_position is None
+    assert panel.tool_position_buttons[3].background_color == list(app_module.GREEN)
+    panel.cancel_scheduled_events()
+
+
+def test_manual_toolchanger_change_uses_station_assignment_and_finishes_green(tmp_path: Path):
+    config = MachineConfig(sim_tool_change_time_s=0.01)
+    panel = _manual_panel(tmp_path, config=config)
+    panel.service.upsert_tool(ToolRecord(tool_number=4, x_offset_mm=-1.0, z_offset_mm=2.5))
+    assert panel.service.assign_tool_station(4, 2)
+    assert panel.service.set_turret_station(1)
+    panel.refresh(panel.service.state)
+
+    p2 = panel.tool_position_buttons[2]
+    panel._manual_select_position(p2, 2)
+    assert p2.background_color == list(app_module.AMBER)
+
+    panel._manual_change_tool()
+
+    assert panel.service.state.active_tool == 4
+    assert panel.service.state.turret_station == 2
+    assert panel.service.state.busy
+    assert panel._tool_button_flash_station == 2
+
+    panel._manual_tool_button_flash_tick(0)
+    assert panel.tool_position_buttons[2].background_color == list(app_module.BLUE)
+
+    panel.service.backend.wait_idle(timeout_ms=500)
+    panel.service.poll()
+
+    assert panel._manual_tool_button_flash_tick(0) is False
+    assert panel.selected_tool_position is None
+    assert panel.tool_position_buttons[2].background_color == list(app_module.GREEN)
+    panel.cancel_scheduled_events()
+
+
+def test_manual_toolchanger_change_preserves_program_pending_tool(tmp_path: Path):
+    config = MachineConfig(sim_tool_change_time_s=0.01)
+    panel = _manual_panel(tmp_path, config=config)
+    panel.service.upsert_tool(ToolRecord(tool_number=4))
+    assert panel.service.assign_tool_station(4, 2)
+    assert panel.service.set_turret_station(1)
+
+    pending = ToolChangeAction(line_number=5, tool_number=9)
+    assert not panel.service.execute_action(pending)
+    assert panel.service.state.pending_tool == 9
+
+    panel._manual_select_position(panel.tool_position_buttons[2], 2)
+    panel._manual_change_tool()
+
+    assert panel.service.state.active_tool == 4
+    assert panel.service.state.turret_station == 2
+    assert panel.service.state.pending_tool == 9
+    assert panel.service.state.pending_turret_station is None
     panel.cancel_scheduled_events()

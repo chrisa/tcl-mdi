@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 
 
 class CamValidationError(ValueError):
@@ -50,7 +51,7 @@ class HoleSpec:
     drill: bool = False
     bore: bool = False
     center_depth_mm: float = 2.0
-    drill_diameter_mm: float = 6.0
+    drill_diameter_mm: float = 5.0
     drill_depth_mm: float = 30.0
     bore_diameter_mm: float = 10.0
     bore_depth_mm: float = 25.0
@@ -59,12 +60,12 @@ class HoleSpec:
     drill_feed: float = 45.0
     boring_feed: float = 35.0
     spindle_rpm: float = 1000.0
-    center_tool_number: int = 2
-    center_station: int | None = 2
-    drill_tool_number: int = 3
-    drill_station: int | None = 3
-    boring_tool_number: int = 4
-    boring_station: int | None = 4
+    center_tool_number: int = 5
+    center_station: int | None = 5
+    drill_tool_number: int = 6
+    drill_station: int | None = 6
+    boring_tool_number: int = 9
+    boring_station: int | None = None
 
 
 @dataclass(frozen=True, init=False)
@@ -81,8 +82,8 @@ class ThreadSpec:
     start_z_mm: float = 0.0
     clearance_mm: float = 3.0
     spindle_rpm: float = 300.0
-    tool_number: int = 6
-    station: int | None = 6
+    tool_number: int = 4
+    station: int | None = 4
 
     def __init__(
         self,
@@ -98,8 +99,8 @@ class ThreadSpec:
         start_z_mm: float = 0.0,
         clearance_mm: float = 3.0,
         spindle_rpm: float = 300.0,
-        tool_number: int = 6,
-        station: int | None = 6,
+        tool_number: int = 4,
+        station: int | None = 4,
         *,
         enabled: bool | None = None,
     ):
@@ -217,6 +218,30 @@ class LatheCamJob:
             stock_back = self.stock.z_front_mm - self.stock.length_mm
             if not (stock_back <= thread_end_z <= self.thread.start_z_mm <= self.stock.z_front_mm):
                 raise CamValidationError("thread Z range must sit inside the stock length")
+
+
+def resolve_tool_stations(
+    job: LatheCamJob,
+    station_for_tool: Callable[[int], int | None],
+) -> LatheCamJob:
+    """Return a CAM job whose M06 station words follow the current tool setup."""
+    return replace(
+        job,
+        turning=replace(
+            job.turning,
+            station=station_for_tool(job.turning.tool_number),
+        ),
+        hole=replace(
+            job.hole,
+            center_station=station_for_tool(job.hole.center_tool_number),
+            drill_station=station_for_tool(job.hole.drill_tool_number),
+            boring_station=station_for_tool(job.hole.boring_tool_number),
+        ),
+        thread=replace(
+            job.thread,
+            station=station_for_tool(job.thread.tool_number),
+        ),
+    )
 
 
 def finished_profile_points(job: LatheCamJob) -> list[tuple[float, float]]:

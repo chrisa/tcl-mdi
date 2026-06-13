@@ -12,6 +12,7 @@ from .models import (
     ThreadSpec,
     TurningSpec,
     CamValidationError,
+    resolve_tool_stations,
 )
 from .solid import CamSolidError, build_part_mesh
 
@@ -29,4 +30,5 @@ __all__ = [
     "build_part_mesh",
     "build_part_outline",
     "generate_cam_program",
+    "resolve_tool_stations",
 ]

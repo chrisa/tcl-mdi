@@ -193,6 +193,10 @@ def test_hole_cam_spindle_starts_are_reverse():
         )
     )
 
+    assert "M06 I5 K5" in program.gcode
+    assert "M06 I6 K6" in program.gcode
+    assert "M06 I9" in program.gcode
+    assert "M06 I9 K" not in program.gcode
     assert program.gcode.count("S1000 M4") == 3
     assert " M3" not in program.gcode
 

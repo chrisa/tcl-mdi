@@ -10,12 +10,17 @@ used for the workpiece touch-off for a particular job.
 2. For each physical tool fitted to the turret, select its logical tool row
    `T1` through `T12`.
 3. Enter the turret station in **Turret P** and press **Save Tool**.
-4. Enter a short **Description** that identifies the actual tool.
-5. Use **Clear P** for any logical tool that is not currently fitted in the
+4. Set **Type** to the tool's machining role.
+5. For drills, enter the drill diameter in **Nominal mm**.
+6. Use **Clear P** for any logical tool that is not currently fitted in the
    turret.
 
 Only one tool can occupy a turret station. If you assign a tool to a station
 that already has another tool, the old assignment is cleared automatically.
+
+CAM uses **Type** and **Nominal mm** to choose which logical tool number to
+call for an operation. It then uses **Turret P** only to decide whether the
+generated tool change can include an automatic turret station.
 
 ## 2. Choose Tool #1 As The Reference
 
@@ -66,7 +71,8 @@ trusted offsets shown in the grid.
 ## 6. Verify Before Job Touch-Off
 
 1. Check that each fitted turret tool has the correct **Turret P** station.
-2. Check that each fitted turret tool has a useful description.
+2. Check that each fitted turret tool has the correct **Type** and any needed
+   **Nominal mm** size.
 3. Check the X and Z offsets for obvious mistakes.
 4. Change back to Tool #1.
 

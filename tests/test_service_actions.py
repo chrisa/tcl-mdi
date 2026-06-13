@@ -4,7 +4,7 @@ from tcl_lathe_hmi.backends.sim import SimBackend
 from tcl_lathe_hmi.config import MachineConfig
 from tcl_lathe_hmi.gcode import DwellAction, MoveAction, ThreadSyncAction, ToolChangeAction
 from tcl_lathe_hmi.machine import MachineService
-from tcl_lathe_hmi.tools import ToolRecord
+from tcl_lathe_hmi.tools import TOOL_TYPE_DRILL, TURNING_TOOL_TYPES, ToolRecord
 
 
 def test_service_executes_move_action_as_delta():
@@ -138,6 +138,13 @@ def test_service_executes_tool_change_from_table_station_without_confirmation():
     assert service.state.active_tool == 3
     assert service.state.turret_station == 3
     assert service.state.pending_tool is None
+
+
+def test_service_exposes_default_tool_lookup_for_cam():
+    service = MachineService(SimBackend(MachineConfig()))
+
+    assert service.first_tool_by_types(TURNING_TOOL_TYPES).tool_number == 1
+    assert service.find_tool_by_type(TOOL_TYPE_DRILL, nominal_size_mm=7.0).tool_number == 7
 
 
 def test_service_marks_non_turret_tool_pending_even_when_current_station_known():

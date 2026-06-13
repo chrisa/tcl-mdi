@@ -5,9 +5,16 @@ from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.spinner import Spinner
 
 from tcl_lathe_hmi.machine import MachineService, MachineState
-from tcl_lathe_hmi.tools import MAX_TOOL_NUMBER
+from tcl_lathe_hmi.tools import (
+    MAX_TOOL_NUMBER,
+    TOOL_TYPE_LABELS,
+    TOOL_TYPES,
+    tool_type_from_label,
+    tool_type_label,
+)
 from tcl_lathe_hmi.ui.controls import (
     AMBER,
     BLUE,
@@ -23,7 +30,6 @@ from tcl_lathe_hmi.ui.controls import (
     paint,
     section_label,
     status_text,
-    text_field,
 )
 from tcl_lathe_hmi.ui.form_values import optional_int, parse_number
 from tcl_lathe_hmi.ui.widgets import bind_release
@@ -34,29 +40,29 @@ class ToolsPanel(BoxLayout):
         super().__init__(orientation="horizontal", spacing=10, **kwargs)
         self.service = service
         self.selected_tool = 1
-        self.row_widgets: dict[int, tuple[Button, Label, Label, Label, Label]] = {}
+        self.row_widgets: dict[int, tuple[Button, Label, Label, Label, Label, Label]] = {}
         paint(self, PANEL)
         self._build()
         self._load_tool_fields(self.selected_tool)
         self.refresh_tools(load_fields=True)
 
     def _build(self) -> None:
-        table_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.62)
+        table_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.66)
         paint(table_side, PANEL_ALT)
         table_side.add_widget(section_label("Tool Table"))
 
         header = GridLayout(
-            cols=5,
+            cols=6,
             spacing=4,
             size_hint_y=None,
             height=34,
         )
-        for text in ("Tool", "Turret P", "X Offset", "Z Offset", "Description"):
+        for text in ("Tool", "Turret P", "Type", "Size", "X Offset", "Z Offset"):
             header.add_widget(self._grid_label(text, color=MUTED, bold=True))
         table_side.add_widget(header)
 
         self.tool_grid = GridLayout(
-            cols=5,
+            cols=6,
             spacing=4,
             size_hint_y=None,
             row_force_default=True,
@@ -68,30 +74,31 @@ class ToolsPanel(BoxLayout):
             select.font_size = 18
             bind_release(select, lambda *_args, tool=tool_number: self._select_tool(tool))
             station = self._grid_label("--")
+            tool_type = self._grid_label("")
+            nominal_size = self._grid_label("--")
             x_offset = self._grid_label("+0.000")
             z_offset = self._grid_label("+0.000")
-            description = self._grid_label("")
-            description.shorten = True
-            description.shorten_from = "right"
             self.row_widgets[tool_number] = (
                 select,
                 station,
+                tool_type,
+                nominal_size,
                 x_offset,
                 z_offset,
-                description,
             )
             self.tool_grid.add_widget(select)
             self.tool_grid.add_widget(station)
+            self.tool_grid.add_widget(tool_type)
+            self.tool_grid.add_widget(nominal_size)
             self.tool_grid.add_widget(x_offset)
             self.tool_grid.add_widget(z_offset)
-            self.tool_grid.add_widget(description)
 
         scroller = ScrollView()
         scroller.add_widget(self.tool_grid)
         table_side.add_widget(scroller)
         self.add_widget(table_side)
 
-        edit_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.38)
+        edit_side = BoxLayout(orientation="vertical", spacing=8, size_hint_x=0.34)
         paint(edit_side, PANEL_ALT)
         edit_side.add_widget(section_label("Offsets / Change"))
 
@@ -104,16 +111,25 @@ class ToolsPanel(BoxLayout):
         edit_side.add_widget(self.pending_label)
         edit_side.add_widget(self.selected_label)
 
-        grid = GridLayout(cols=2, spacing=8, size_hint_y=None, height=214)
+        grid = GridLayout(cols=2, spacing=8, size_hint_y=None, height=260)
         self.station_input = field_input("1", integer=True, title_text="Turret Station")
+        self.tool_type_spinner = Spinner(
+            text=tool_type_label("unspecified"),
+            values=tuple(TOOL_TYPE_LABELS[tool_type] for tool_type in TOOL_TYPES),
+            font_size=18,
+            background_normal="",
+            background_color=BUTTON,
+            color=TEXT,
+        )
+        self.nominal_size_input = field_input("", title_text="Nominal Size")
         self.x_offset_input = field_input("0.0", title_text="X Offset")
         self.z_offset_input = field_input("0.0", title_text="Z Offset")
-        self.description_input = text_field("")
         for label, widget in (
             ("Turret P", self.station_input),
+            ("Type", self.tool_type_spinner),
+            ("Nominal mm", self.nominal_size_input),
             ("X offset", self.x_offset_input),
             ("Z offset", self.z_offset_input),
-            ("Description", self.description_input),
         ):
             grid.add_widget(Label(text=label, color=MUTED, font_size=20))
             grid.add_widget(widget)
@@ -197,6 +213,7 @@ class ToolsPanel(BoxLayout):
     def _save_selected_tool(self) -> None:
         try:
             station = optional_int(self.station_input.text)
+            nominal_size = optional_float(self.nominal_size_input.text)
             x_offset = parse_number(self.x_offset_input.text, 0.0)
             z_offset = parse_number(self.z_offset_input.text, 0.0)
         except ValueError as exc:
@@ -208,7 +225,8 @@ class ToolsPanel(BoxLayout):
             station=station,
             x_offset_mm=x_offset,
             z_offset_mm=z_offset,
-            description=self.description_input.text,
+            tool_type=tool_type_from_label(self.tool_type_spinner.text),
+            nominal_size_mm=nominal_size,
         ):
             self._set_status(self.service.state.status_message, RED)
             return
@@ -276,21 +294,30 @@ class ToolsPanel(BoxLayout):
         station = self.service.station_for_tool(tool_number)
         self.selected_label.text = f"Editing T{tool_number}"
         self.station_input.text = "" if station is None else str(station)
+        self.tool_type_spinner.text = tool.type_label
+        self.nominal_size_input.text = (
+            "" if tool.nominal_size_mm is None else f"{tool.nominal_size_mm:g}"
+        )
         self.x_offset_input.text = f"{tool.x_offset_mm:0.3f}"
         self.z_offset_input.text = f"{tool.z_offset_mm:0.3f}"
-        self.description_input.text = tool.description
 
     def _refresh_tool_grid(self) -> None:
         active_tool = self.service.state.active_tool
         for tool in self.service.tool_table.tools:
-            select, station_label, x_label, z_label, description_label = self.row_widgets[
-                tool.tool_number
-            ]
+            (
+                select,
+                station_label,
+                type_label,
+                nominal_label,
+                x_label,
+                z_label,
+            ) = self.row_widgets[tool.tool_number]
             station = self.service.station_for_tool(tool.tool_number)
             station_label.text = "--" if station is None else f"P{station}"
+            type_label.text = tool_type_label(tool.tool_type)
+            nominal_label.text = "--" if tool.nominal_size_mm is None else f"{tool.nominal_size_mm:g}"
             x_label.text = f"{tool.x_offset_mm:+0.3f}"
             z_label.text = f"{tool.z_offset_mm:+0.3f}"
-            description_label.text = tool.description
             if tool.tool_number == self.selected_tool:
                 select.background_color = BLUE
             elif tool.tool_number == active_tool:
@@ -314,3 +341,11 @@ class ToolsPanel(BoxLayout):
     def _set_status(self, message: str, color) -> None:
         self.tool_status.text = message
         self.tool_status.color = color
+
+
+def optional_float(value: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    parsed = float(text)
+    return parsed if parsed > 0.0 else None

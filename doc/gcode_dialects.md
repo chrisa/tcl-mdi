@@ -38,6 +38,12 @@ Current executable program support:
 | `M03/M04/M05` | Spindle forward/reverse/stop. |
 | `M06 I... K...` | Tool change request using logical tool and optional station. |
 
+For CAM-generated programs, `I` comes from the logical tool selected by
+Tools-tab metadata such as tool type and nominal drill size. `K` comes from the
+current turret station assignment for that logical tool. If a logical tool has
+no turret station, CAM omits `K` and program execution uses the manual pending
+tool-change flow.
+
 `G33` is intentionally Z-only in this HMI because FredClient currently exposes a
 Z synchronized pass primitive:
 
@@ -101,4 +107,3 @@ pass_depth_on_diameter = total_depth_on_diameter * sqrt(pass_index / pass_count)
 
 Spring passes repeat the final X depth. Threading uses spindle synchronisation
 through FRED, so it should not be expanded into ordinary timed `G1` feed moves.
-

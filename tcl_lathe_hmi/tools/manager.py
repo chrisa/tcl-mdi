@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
@@ -86,31 +87,51 @@ class ToolManager:
         self.save()
         return tool
 
-    def update_tool_description(self, tool_number: int, description: str) -> ToolRecord:
-        tool = self.tool_table.update_description(tool_number, description)
-        self.save()
-        return tool
-
     def update_tool(
         self,
         tool_number: int,
         *,
         x_offset_mm: float,
         z_offset_mm: float,
-        description: str,
         station: int | None,
+        tool_type: str | None = None,
+        nominal_size_mm: float | None = None,
     ) -> ToolRecord:
         current = self.require_tool(tool_number)
         updated = replace(
             current,
             x_offset_mm=x_offset_mm,
             z_offset_mm=z_offset_mm,
-            description=description.strip(),
+            tool_type=current.tool_type if tool_type is None else tool_type,
+            nominal_size_mm=(
+                current.nominal_size_mm
+                if tool_type is None and nominal_size_mm is None
+                else nominal_size_mm
+            ),
         )
         self.tool_table.upsert(updated)
         self.turret.assign(tool_number, station)
         self.save()
         return updated
+
+    def find_tool_by_type(
+        self,
+        tool_type: str,
+        *,
+        nominal_size_mm: float | None = None,
+    ) -> ToolRecord | None:
+        return self.tool_table.find_by_type(tool_type, nominal_size_mm=nominal_size_mm)
+
+    def first_tool_by_types(
+        self,
+        tool_types: Iterable[str],
+        *,
+        nominal_size_mm: float | None = None,
+    ) -> ToolRecord | None:
+        return self.tool_table.first_by_types(
+            tool_types,
+            nominal_size_mm=nominal_size_mm,
+        )
 
     def station_for_tool(self, tool_number: int) -> int | None:
         self.require_tool(tool_number)

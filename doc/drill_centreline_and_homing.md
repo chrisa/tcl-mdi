@@ -118,8 +118,8 @@ This gives the HMI a repeatable absolute reference for axial tools.
 
 After homing and centreline calibration exist:
 
-- Add a tool type field in the Tools tab:
-  `Turning`, `Boring`, `Drill`, `Centre drill`, `Reamer`, `Tap`.
+- Extend the existing Tools tab type field for centreline-specific workflow
+  types such as `Reamer` and `Tap` if those are added to CAM.
 - For axial tool types, show centreline actions prominently:
   - `Set X To Centreline`
   - `Go X Centreline`

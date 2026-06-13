@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
@@ -449,7 +450,8 @@ class MachineService:
         station: int | None,
         x_offset_mm: float,
         z_offset_mm: float,
-        description: str,
+        tool_type: str | None = None,
+        nominal_size_mm: float | None = None,
     ) -> bool:
         try:
             tool = self.tools.update_tool(
@@ -457,7 +459,8 @@ class MachineService:
                 station=station,
                 x_offset_mm=x_offset_mm,
                 z_offset_mm=z_offset_mm,
-                description=description,
+                tool_type=tool_type,
+                nominal_size_mm=nominal_size_mm,
             )
         except (OSError, ValueError) as exc:
             self._mark_rejected(f"Could not update T{tool_number}: {exc}")
@@ -519,15 +522,6 @@ class MachineService:
         )
         return True
 
-    def update_tool_description(self, tool_number: int, description: str) -> bool:
-        try:
-            self.tools.update_tool_description(tool_number, description)
-        except (OSError, ValueError) as exc:
-            self._mark_rejected(f"Could not update T{tool_number} description: {exc}")
-            return False
-        self.state = replace(self.state, status_message=f"T{tool_number} description saved")
-        return True
-
     def station_for_tool(self, tool_number: int) -> int | None:
         try:
             return self.tools.station_for_tool(tool_number)
@@ -539,6 +533,28 @@ class MachineService:
             return self.tools.tool_for_station(station)
         except ValueError:
             return None
+
+    def find_tool_by_type(
+        self,
+        tool_type: str,
+        *,
+        nominal_size_mm: float | None = None,
+    ) -> ToolRecord | None:
+        return self.tools.find_tool_by_type(
+            tool_type,
+            nominal_size_mm=nominal_size_mm,
+        )
+
+    def first_tool_by_types(
+        self,
+        tool_types: Iterable[str],
+        *,
+        nominal_size_mm: float | None = None,
+    ) -> ToolRecord | None:
+        return self.tools.first_tool_by_types(
+            tool_types,
+            nominal_size_mm=nominal_size_mm,
+        )
 
     def teach_tool_z(self, known_z_mm: float = 0.0, tool_number: int | None = None) -> bool:
         selected_tool = self._selected_tool_number(tool_number)

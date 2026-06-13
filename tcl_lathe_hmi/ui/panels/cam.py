@@ -17,10 +17,18 @@ from tcl_lathe_hmi.cam import (
     TurningSpec,
     build_part_outline,
     generate_cam_program,
+    resolve_tool_stations,
 )
 from tcl_lathe_hmi.gcode import CanonicalAction, GCodeParseError, build_preview, parse_gcode
 from tcl_lathe_hmi.gcode.validation import preview_limit_error
 from tcl_lathe_hmi.machine import MachineService, MachineState
+from tcl_lathe_hmi.tools import (
+    TOOL_TYPE_BORING_BAR,
+    TOOL_TYPE_CENTRE_DRILL,
+    TOOL_TYPE_DRILL,
+    TOOL_TYPE_EXTERNAL_THREAD,
+    TURNING_TOOL_TYPES,
+)
 from tcl_lathe_hmi.ui.canvases import PartIsoCanvas, PreviewCanvas
 from tcl_lathe_hmi.ui.controls import (
     AMBER,
@@ -45,6 +53,9 @@ from tcl_lathe_hmi.ui.keypad import NumberEntryButton
 from tcl_lathe_hmi.ui.widgets import bind_release, configure_touch_release
 
 
+DEFAULT_DRILL_DIAMETER_MM = 5.0
+
+
 class CamPanel(BoxLayout):
     def __init__(
         self,
@@ -67,6 +78,8 @@ class CamPanel(BoxLayout):
         self.thread_external_enabled = False
         self.thread_internal_enabled = False
         self.thread_taper_enabled = False
+        self.tool_inputs: dict[str, NumberEntryButton] = {}
+        self.manual_tool_overrides: set[str] = set()
 
         paint(self, PANEL)
         self._build()
@@ -118,6 +131,7 @@ class CamPanel(BoxLayout):
         )
         preview_side.add_widget(self.gcode_editor)
         self.add_widget(preview_side)
+        self._refresh_tool_defaults()
         self._update_part_preview(stale=False)
 
     def _build_stock_box(self) -> BoxLayout:
@@ -174,7 +188,11 @@ class CamPanel(BoxLayout):
         self.rough_feed_input = self._cam_field("80", title_text="Rough Feed")
         self.finish_feed_input = self._cam_field("40", title_text="Finish Feed")
         self.turn_rpm_input = self._cam_field("1200", title_text="Turning RPM")
-        self.turn_tool_input = self._cam_field("1", integer=True, title_text="Turning Tool")
+        self.turn_tool_input = self._cam_tool_field(
+            "turning",
+            "1",
+            title_text="Turning Tool",
+        )
         self._add_labeled(turn_grid, "Target", self.target_diameter_input)
         self._add_labeled(turn_grid, "Length", self.target_length_input)
         self._add_labeled(turn_grid, "Leave", self.stock_leave_input)
@@ -227,15 +245,32 @@ class CamPanel(BoxLayout):
             hole_flag_row.add_widget(self._flag_button(label, attr))
         tab.add_widget(hole_flag_row)
 
-        hole_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=184)
+        hole_grid = GridLayout(cols=4, spacing=6, size_hint_y=None, height=230)
         self.center_depth_input = self._cam_field("2.0", title_text="Center Drill Depth")
-        self.drill_diameter_input = self._cam_field("6.0", title_text="Drill Diameter")
+        self.drill_diameter_input = self._cam_field(
+            f"{DEFAULT_DRILL_DIAMETER_MM:g}",
+            title_text="Drill Diameter",
+        )
         self.drill_depth_input = self._cam_field("30.0", title_text="Drill Depth")
         self.bore_diameter_input = self._cam_field("10.0", title_text="Bore Diameter")
         self.bore_depth_input = self._cam_field("25.0", title_text="Bore Depth")
         self.boring_step_input = self._cam_field("0.5", title_text="Boring Stepover")
         self.hole_rpm_input = self._cam_field("1000", title_text="Hole RPM")
-        self.boring_tool_input = self._cam_field("4", integer=True, title_text="Boring Tool")
+        self.center_tool_input = self._cam_tool_field(
+            "center",
+            "5",
+            title_text="Center Drill Tool",
+        )
+        self.drill_tool_input = self._cam_tool_field(
+            "drill",
+            "6",
+            title_text="Drill Tool",
+        )
+        self.boring_tool_input = self._cam_tool_field(
+            "boring",
+            "9",
+            title_text="Boring Tool",
+        )
         self._add_labeled(hole_grid, "Center Z", self.center_depth_input)
         self._add_labeled(hole_grid, "Drill dia", self.drill_diameter_input)
         self._add_labeled(hole_grid, "Drill Z", self.drill_depth_input)
@@ -243,6 +278,8 @@ class CamPanel(BoxLayout):
         self._add_labeled(hole_grid, "Bore Z", self.bore_depth_input)
         self._add_labeled(hole_grid, "Bore step", self.boring_step_input)
         self._add_labeled(hole_grid, "RPM", self.hole_rpm_input)
+        self._add_labeled(hole_grid, "Center T", self.center_tool_input)
+        self._add_labeled(hole_grid, "Drill T", self.drill_tool_input)
         self._add_labeled(hole_grid, "Bore tool", self.boring_tool_input)
         tab.add_widget(hole_grid)
         return tab
@@ -273,7 +310,11 @@ class CamPanel(BoxLayout):
         self.thread_start_z_input = self._cam_field("0.0", title_text="Thread Start Z")
         self.thread_clearance_input = self._cam_field("3.0", title_text="Thread Clearance")
         self.thread_rpm_input = self._cam_field("300", title_text="Thread RPM")
-        self.thread_tool_input = self._cam_field("6", integer=True, title_text="Thread Tool")
+        self.thread_tool_input = self._cam_tool_field(
+            "thread",
+            "4",
+            title_text="Thread Tool",
+        )
         self._add_labeled(thread_grid, "Major", self.thread_major_input)
         self._add_labeled(thread_grid, "Pitch", self.thread_pitch_input)
         self._add_labeled(thread_grid, "Length", self.thread_length_input)
@@ -288,6 +329,7 @@ class CamPanel(BoxLayout):
         return tab
 
     def refresh(self, state: MachineState) -> None:
+        self._refresh_tool_defaults()
         self.preview.set_tool_position(x_mm=state.work_x_mm, z_mm=state.work_z_mm)
 
     def _cam_field(
@@ -303,6 +345,22 @@ class CamPanel(BoxLayout):
             title_text=title_text,
             on_value=lambda _value: self._cam_input_changed(),
         )
+
+    def _cam_tool_field(
+        self,
+        key: str,
+        text: str,
+        *,
+        title_text: str,
+    ) -> NumberEntryButton:
+        field = field_input(
+            text,
+            integer=True,
+            title_text=title_text,
+            on_value=lambda _value: self._tool_input_changed(key),
+        )
+        self.tool_inputs[key] = field
+        return field
 
     def _add_labeled(self, grid: GridLayout, label: str, widget) -> None:
         grid.add_widget(Label(text=label, color=MUTED, font_size=17))
@@ -346,10 +404,16 @@ class CamPanel(BoxLayout):
         button.background_color = GREEN if button.state == "down" else BUTTON
 
     def _cam_input_changed(self) -> None:
+        if hasattr(self, "tool_inputs"):
+            self._refresh_tool_defaults()
         self.generated_gcode = ""
         if hasattr(self, "gcode_editor"):
             self.gcode_editor.text = ""
         self._update_part_preview(stale=True)
+
+    def _tool_input_changed(self, key: str) -> None:
+        self.manual_tool_overrides.add(key)
+        self._cam_input_changed()
 
     def _update_part_preview(self, *, stale: bool, set_status: bool = True) -> bool:
         if not hasattr(self, "preview"):
@@ -421,10 +485,17 @@ class CamPanel(BoxLayout):
             self.on_program_ready(self.generated_gcode, run=True)
 
     def _job_from_fields(self) -> LatheCamJob:
-        turning_tool = int(parse_number(self.turn_tool_input.text, 1))
-        boring_tool = int(parse_number(self.boring_tool_input.text, 4))
-        thread_tool = int(parse_number(self.thread_tool_input.text, 6))
-        return LatheCamJob(
+        drill_diameter = parse_number(
+            self.drill_diameter_input.text,
+            DEFAULT_DRILL_DIAMETER_MM,
+        )
+        turning_tool = self._tool_number_from_field("turning")
+        center_tool = self._tool_number_from_field("center")
+        drill_tool = self._tool_number_from_field("drill")
+        boring_tool = self._tool_number_from_field("boring")
+        thread_tool = self._tool_number_from_field("thread")
+        self._validate_drill_tool_size(drill_tool, drill_diameter)
+        job = LatheCamJob(
             stock=StockSpec(
                 diameter_mm=parse_number(self.stock_diameter_input.text, 20.0),
                 length_mm=parse_number(self.stock_length_input.text, 60.0),
@@ -444,7 +515,6 @@ class CamPanel(BoxLayout):
                 finish_feed=parse_number(self.finish_feed_input.text, 40.0),
                 spindle_rpm=parse_number(self.turn_rpm_input.text, 1200.0),
                 tool_number=turning_tool,
-                station=turning_tool,
                 tool_string=self.tool_string_input.text.strip() or "DCMT070204R",
             ),
             taper=TaperSpec(
@@ -459,14 +529,15 @@ class CamPanel(BoxLayout):
                 drill=self.drill_enabled,
                 bore=self.bore_enabled,
                 center_depth_mm=parse_number(self.center_depth_input.text, 2.0),
-                drill_diameter_mm=parse_number(self.drill_diameter_input.text, 6.0),
+                drill_diameter_mm=drill_diameter,
                 drill_depth_mm=parse_number(self.drill_depth_input.text, 30.0),
                 bore_diameter_mm=parse_number(self.bore_diameter_input.text, 10.0),
                 bore_depth_mm=parse_number(self.bore_depth_input.text, 25.0),
                 boring_step_over_mm=parse_number(self.boring_step_input.text, 0.5),
                 spindle_rpm=parse_number(self.hole_rpm_input.text, 1000.0),
+                center_tool_number=center_tool,
+                drill_tool_number=drill_tool,
                 boring_tool_number=boring_tool,
-                boring_station=boring_tool,
             ),
             thread=ThreadSpec(
                 external=self.thread_external_enabled,
@@ -482,9 +553,66 @@ class CamPanel(BoxLayout):
                 clearance_mm=parse_number(self.thread_clearance_input.text, 3.0),
                 spindle_rpm=parse_number(self.thread_rpm_input.text, 300.0),
                 tool_number=thread_tool,
-                station=thread_tool,
             ),
         )
+        return resolve_tool_stations(job, self.service.station_for_tool)
+
+    def _refresh_tool_defaults(self) -> None:
+        for key, field in self.tool_inputs.items():
+            if key in self.manual_tool_overrides:
+                continue
+            field.text = str(self._default_tool_number(key))
+
+    def _default_tool_number(self, key: str) -> int:
+        fallback = {
+            "turning": 1,
+            "center": 5,
+            "drill": 6,
+            "boring": 9,
+            "thread": 4,
+        }[key]
+        tool = None
+        if key == "turning":
+            tool = self.service.first_tool_by_types(TURNING_TOOL_TYPES)
+        elif key == "center":
+            tool = self.service.find_tool_by_type(TOOL_TYPE_CENTRE_DRILL)
+        elif key == "drill":
+            drill_diameter = (
+                parse_number(self.drill_diameter_input.text, DEFAULT_DRILL_DIAMETER_MM)
+                if hasattr(self, "drill_diameter_input")
+                else DEFAULT_DRILL_DIAMETER_MM
+            )
+            tool = self.service.find_tool_by_type(
+                TOOL_TYPE_DRILL,
+                nominal_size_mm=drill_diameter,
+            ) or self.service.find_tool_by_type(TOOL_TYPE_DRILL)
+        elif key == "boring":
+            tool = self.service.find_tool_by_type(TOOL_TYPE_BORING_BAR)
+        elif key == "thread":
+            tool = self.service.find_tool_by_type(TOOL_TYPE_EXTERNAL_THREAD)
+        return fallback if tool is None else tool.tool_number
+
+    def _tool_number_from_field(self, key: str) -> int:
+        field = self.tool_inputs[key]
+        text = field.text.strip()
+        if not text:
+            return self._default_tool_number(key)
+        return int(float(text))
+
+    def _validate_drill_tool_size(self, drill_tool: int, drill_diameter: float) -> None:
+        if not self.drill_enabled:
+            return
+        tool = self.service.tool_table.get(drill_tool)
+        if (
+            tool is not None
+            and tool.tool_type == TOOL_TYPE_DRILL
+            and tool.nominal_size_mm is not None
+            and abs(tool.nominal_size_mm - drill_diameter) >= 1e-6
+        ):
+            raise ValueError(
+                f"T{drill_tool} is configured as {tool.nominal_size_mm:g}mm drill; "
+                f"CAM drill diameter is {drill_diameter:g}mm"
+            )
 
     def _preview_limit_error(self, actions: list[CanonicalAction]) -> str | None:
         return preview_limit_error(

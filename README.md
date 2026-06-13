@@ -33,13 +33,19 @@ MDI/program execution with pending tool confirmation and current line highlight:
 - CAM screen with stock, face/rough/finish/taper, drill/bore inputs, 3D part
   sense-check rendering, generated G-code, and direct handoff to MDI.
 
-The default tool table is a sample with 12 logical tools. Tools T1-T8 are
-assigned to physical turret stations P1-P8 and can run through the automatic
-FRED toolchanger path. Tools T9-T12 are manual/non-turret sample tools and
-will leave a pending confirmation when requested by a program.
+The default tool table is seeded from the original TCL host tool screen:
+T1/T2/T3 are copy turning tools, T4 is external threading, T5 is centre drill,
+T6/T7/T8 are 5/7/10 mm drills, T9 is boring, T10 is internal threading, and
+T11/T12 are parting tools. Tools T1-T8 are assigned to physical turret stations
+P1-P8 and can run through the automatic FRED toolchanger path. Tools T9-T12 are
+manual/non-turret sample tools and will leave a pending confirmation when
+requested by a program.
 
 The Tools tab stores the logical tool table and the current turret assignments
-in the app's native `tools.json` format. See
+in the app's native `tools.json` format. Each logical tool has a role/type and
+optional nominal size; CAM uses that metadata to pick the logical `T` number,
+then uses the turret assignment to emit the physical `K` station when one is
+available. See
 [`doc/tool_setup_operator_guide.md`](doc/tool_setup_operator_guide.md) for the
 operator procedure for teaching offsets relative to Tool #1.
 

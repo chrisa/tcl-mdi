@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -9,6 +10,52 @@ from pathlib import Path
 MAX_TOOL_NUMBER = 12
 TURRET_STATIONS = 8
 REFERENCE_TOOL_NUMBER = 1
+
+TOOL_TYPE_UNSPECIFIED = "unspecified"
+TOOL_TYPE_TURNING_LH = "turning_lh"
+TOOL_TYPE_TURNING_RH = "turning_rh"
+TOOL_TYPE_TURNING_NEUTRAL = "turning_neutral"
+TOOL_TYPE_EXTERNAL_THREAD = "external_thread"
+TOOL_TYPE_CENTRE_DRILL = "centre_drill"
+TOOL_TYPE_DRILL = "drill"
+TOOL_TYPE_BORING_BAR = "boring_bar"
+TOOL_TYPE_INTERNAL_THREAD = "internal_thread"
+TOOL_TYPE_PARTING_REAR = "parting_rear"
+TOOL_TYPE_PARTING_FRONT = "parting_front"
+
+TOOL_TYPES = (
+    TOOL_TYPE_UNSPECIFIED,
+    TOOL_TYPE_TURNING_LH,
+    TOOL_TYPE_TURNING_RH,
+    TOOL_TYPE_TURNING_NEUTRAL,
+    TOOL_TYPE_EXTERNAL_THREAD,
+    TOOL_TYPE_CENTRE_DRILL,
+    TOOL_TYPE_DRILL,
+    TOOL_TYPE_BORING_BAR,
+    TOOL_TYPE_INTERNAL_THREAD,
+    TOOL_TYPE_PARTING_REAR,
+    TOOL_TYPE_PARTING_FRONT,
+)
+
+TOOL_TYPE_LABELS = {
+    TOOL_TYPE_UNSPECIFIED: "Unspecified",
+    TOOL_TYPE_TURNING_LH: "55 LH Copy",
+    TOOL_TYPE_TURNING_RH: "55 RH Copy",
+    TOOL_TYPE_TURNING_NEUTRAL: "Neutral Copy",
+    TOOL_TYPE_EXTERNAL_THREAD: "External Thread",
+    TOOL_TYPE_CENTRE_DRILL: "Centre Drill",
+    TOOL_TYPE_DRILL: "Drill",
+    TOOL_TYPE_BORING_BAR: "Boring Bar",
+    TOOL_TYPE_INTERNAL_THREAD: "Internal Thread",
+    TOOL_TYPE_PARTING_REAR: "Parting Rear",
+    TOOL_TYPE_PARTING_FRONT: "Parting Front",
+}
+
+TURNING_TOOL_TYPES = (
+    TOOL_TYPE_TURNING_LH,
+    TOOL_TYPE_TURNING_RH,
+    TOOL_TYPE_TURNING_NEUTRAL,
+)
 
 WORD_RE = re.compile(r"([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
 
@@ -18,11 +65,21 @@ class ToolRecord:
     tool_number: int
     x_offset_mm: float = 0.0
     z_offset_mm: float = 0.0
-    description: str = ""
+    tool_type: str = TOOL_TYPE_UNSPECIFIED
+    nominal_size_mm: float | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tool_type", normalize_tool_type(self.tool_type))
+        if self.nominal_size_mm is not None and self.nominal_size_mm <= 0.0:
+            object.__setattr__(self, "nominal_size_mm", None)
 
     @property
     def display_name(self) -> str:
         return f"T{self.tool_number}"
+
+    @property
+    def type_label(self) -> str:
+        return tool_type_label(self.tool_type)
 
 
 class ToolTable:
@@ -67,11 +124,43 @@ class ToolTable:
         self.upsert(updated)
         return updated
 
-    def update_description(self, tool_number: int, description: str) -> ToolRecord:
-        tool = self.ensure_tool(tool_number)
-        updated = replace(tool, description=description.strip())
-        self.upsert(updated)
-        return updated
+    def find_by_type(
+        self,
+        tool_type: str,
+        *,
+        nominal_size_mm: float | None = None,
+    ) -> ToolRecord | None:
+        normalized = normalize_tool_type(tool_type)
+        candidates = [tool for tool in self.tools if tool.tool_type == normalized]
+        if nominal_size_mm is None:
+            return candidates[0] if candidates else None
+
+        for tool in candidates:
+            if (
+                tool.nominal_size_mm is not None
+                and abs(tool.nominal_size_mm - nominal_size_mm) < 1e-6
+            ):
+                return tool
+        return None
+
+    def first_by_types(
+        self,
+        tool_types: Iterable[str],
+        *,
+        nominal_size_mm: float | None = None,
+    ) -> ToolRecord | None:
+        normalized_types = tuple(normalize_tool_type(tool_type) for tool_type in tool_types)
+        if nominal_size_mm is not None:
+            for tool_type in normalized_types:
+                tool = self.find_by_type(tool_type, nominal_size_mm=nominal_size_mm)
+                if tool is not None:
+                    return tool
+
+        for tool_type in normalized_types:
+            tool = self.find_by_type(tool_type)
+            if tool is not None:
+                return tool
+        return None
 
     def to_json(self) -> list[dict[str, object]]:
         return [
@@ -79,7 +168,8 @@ class ToolTable:
                 "tool_number": tool.tool_number,
                 "x_offset_mm": tool.x_offset_mm,
                 "z_offset_mm": tool.z_offset_mm,
-                "description": tool.description,
+                "tool_type": tool.tool_type,
+                "nominal_size_mm": tool.nominal_size_mm,
             }
             for tool in self.tools
         ]
@@ -92,12 +182,23 @@ class ToolTable:
         for item in data:
             if not isinstance(item, dict):
                 raise ValueError("tool entries must be objects")
+            tool_number = int(item["tool_number"])
+            fallback = table.get(tool_number)
+            fallback_tool_type = (
+                fallback.tool_type if fallback is not None else TOOL_TYPE_UNSPECIFIED
+            )
             table.upsert(
                 ToolRecord(
-                    tool_number=int(item["tool_number"]),
+                    tool_number=tool_number,
                     x_offset_mm=float(item.get("x_offset_mm", 0.0)),
                     z_offset_mm=float(item.get("z_offset_mm", 0.0)),
-                    description=str(item.get("description", "")).strip(),
+                    tool_type=_optional_tool_type(item.get("tool_type"), fallback_tool_type),
+                    nominal_size_mm=_optional_float(
+                        item.get(
+                            "nominal_size_mm",
+                            fallback.nominal_size_mm if fallback is not None else None,
+                        )
+                    ),
                 )
             )
         return table
@@ -202,18 +303,30 @@ class ToolSetup:
 
 def sample_tool_records() -> list[ToolRecord]:
     return [
-        ToolRecord(tool_number=1, description="turning rough/finish"),
-        ToolRecord(tool_number=2, description="centre drill"),
-        ToolRecord(tool_number=3, description="6mm drill"),
-        ToolRecord(tool_number=4, description="boring bar"),
-        ToolRecord(tool_number=5, description="parting tool"),
-        ToolRecord(tool_number=6, description="external thread"),
-        ToolRecord(tool_number=7, description="internal thread"),
-        ToolRecord(tool_number=8, description="spare turret station"),
-        ToolRecord(tool_number=9, description="manual 8mm drill"),
-        ToolRecord(tool_number=10, description="manual 10mm drill"),
-        ToolRecord(tool_number=11, description="manual tap"),
-        ToolRecord(tool_number=12, description="manual special tool"),
+        ToolRecord(tool_number=1, tool_type=TOOL_TYPE_TURNING_LH),
+        ToolRecord(tool_number=2, tool_type=TOOL_TYPE_TURNING_RH),
+        ToolRecord(tool_number=3, tool_type=TOOL_TYPE_TURNING_NEUTRAL),
+        ToolRecord(tool_number=4, tool_type=TOOL_TYPE_EXTERNAL_THREAD),
+        ToolRecord(tool_number=5, tool_type=TOOL_TYPE_CENTRE_DRILL),
+        ToolRecord(
+            tool_number=6,
+            tool_type=TOOL_TYPE_DRILL,
+            nominal_size_mm=5.0,
+        ),
+        ToolRecord(
+            tool_number=7,
+            tool_type=TOOL_TYPE_DRILL,
+            nominal_size_mm=7.0,
+        ),
+        ToolRecord(
+            tool_number=8,
+            tool_type=TOOL_TYPE_DRILL,
+            nominal_size_mm=10.0,
+        ),
+        ToolRecord(tool_number=9, tool_type=TOOL_TYPE_BORING_BAR, nominal_size_mm=14.0),
+        ToolRecord(tool_number=10, tool_type=TOOL_TYPE_INTERNAL_THREAD),
+        ToolRecord(tool_number=11, tool_type=TOOL_TYPE_PARTING_REAR),
+        ToolRecord(tool_number=12, tool_type=TOOL_TYPE_PARTING_FRONT),
     ]
 
 
@@ -236,6 +349,21 @@ def setup_from_legacy_linuxcnc(text: str) -> ToolSetup:
         if record is None:
             continue
         if 1 <= record.tool_number <= MAX_TOOL_NUMBER:
+            fallback = setup.table.get(record.tool_number)
+            if fallback is not None:
+                record = replace(
+                    record,
+                    tool_type=(
+                        fallback.tool_type
+                        if record.tool_type == TOOL_TYPE_UNSPECIFIED
+                        else record.tool_type
+                    ),
+                    nominal_size_mm=(
+                        fallback.nominal_size_mm
+                        if record.nominal_size_mm is None
+                        else record.nominal_size_mm
+                    ),
+                )
             setup.table.upsert(record)
             if station is not None and 1 <= station <= TURRET_STATIONS:
                 setup.turret.assign(record.tool_number, station)
@@ -247,7 +375,7 @@ def parse_legacy_linuxcnc_tool_line(
     *,
     line_number: int = 0,
 ) -> tuple[ToolRecord | None, int | None]:
-    content, description = _split_comment(line)
+    content, _comment = _split_comment(line)
     content = content.strip()
     if not content:
         return None, None
@@ -275,7 +403,6 @@ def parse_legacy_linuxcnc_tool_line(
             tool_number=int(words["T"]),
             x_offset_mm=float(words.get("X", 0.0)),
             z_offset_mm=float(words.get("Z", 0.0)),
-            description=description.strip(),
         ),
         int(words["P"]) if "P" in words else None,
     )
@@ -286,6 +413,38 @@ def _split_comment(line: str) -> tuple[str, str]:
         return line, ""
     content, comment = line.split(";", 1)
     return content, comment
+
+
+def normalize_tool_type(tool_type: str) -> str:
+    normalized = tool_type.strip().lower().replace(" ", "_")
+    return normalized or TOOL_TYPE_UNSPECIFIED
+
+
+def tool_type_label(tool_type: str) -> str:
+    return TOOL_TYPE_LABELS.get(normalize_tool_type(tool_type), tool_type.strip() or "Unspecified")
+
+
+def tool_type_from_label(label: str) -> str:
+    stripped = label.strip()
+    for tool_type, tool_label in TOOL_TYPE_LABELS.items():
+        if stripped == tool_label:
+            return tool_type
+    return normalize_tool_type(stripped)
+
+
+def _optional_tool_type(value: object, fallback: str) -> str:
+    if value is None:
+        return fallback
+    return str(value)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return float(text)
 
 
 def _validate_tool_number(tool_number: int) -> None:

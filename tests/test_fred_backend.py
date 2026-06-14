@@ -113,7 +113,7 @@ def test_fred_backend_waits_for_motion_target_feedback_after_controller_idle():
     backend.jog_delta(x_mm=0.1, z_mm=0.0, mode="feed", feed=120, slew=61)
     assert client.commands[-1] == (
         "feed",
-        {"x_mm": 0.1, "z_mm": 0.0, "feed": 120, "slew": 61, "wait": False},
+        {"x_mm": 0.1, "z_mm": 0.0, "feed": 120, "slew": 40, "wait": False},
     )
     assert backend.poll().busy
 
@@ -126,6 +126,20 @@ def test_fred_backend_waits_for_motion_target_feedback_after_controller_idle():
     state = backend.poll()
     assert not state.busy
     assert state.x_mm == 1.35
+
+
+def test_fred_backend_sends_rapid_jog_via_rapid_api():
+    FakeFredClient.instances = []
+    backend = FredBackend(MachineConfig(), client_factory=FakeFredClientWithThreadSync)
+    backend.connect()
+    client = FakeFredClient.instances[-1]
+
+    backend.jog_delta(x_mm=0.0, z_mm=1.0, mode="rapid", slew=61)
+
+    assert client.commands[-1] == (
+        "rapid",
+        {"x_mm": 0.0, "z_mm": 1.0, "slew": 40, "wait": False},
+    )
 
 
 def test_fred_backend_waits_for_spindle_at_speed_after_controller_idle():
@@ -171,7 +185,7 @@ def test_fred_backend_waits_for_toolchanger_station_dwell_after_controller_idle(
 
     assert client.commands[-1] == (
         "tool",
-        {"current_station": 6, "target_station": 2, "slew": 61, "wait": False},
+        {"current_station": 6, "target_station": 2, "slew": 40, "wait": False},
     )
     assert backend.poll().busy
 
@@ -196,7 +210,7 @@ def test_fred_backend_skips_toolchanger_for_same_station():
     assert not backend.select_tool(current_station=3, target_station=3, slew=61)
     assert client.commands[-1] == (
         "tool",
-        {"current_station": 3, "target_station": 3, "slew": 61, "wait": False},
+        {"current_station": 3, "target_station": 3, "slew": 40, "wait": False},
     )
 
 

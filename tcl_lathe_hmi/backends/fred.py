@@ -144,11 +144,14 @@ class FredBackend:
         client = self._require_ready()
         target = (self._state.x_mm + x_mm, self._state.z_mm + z_mm)
         baseline_generation = self._latest_snapshot_generation
+        # For ordinary FRED motion m9 is the current spindle speed code (old-host SSL),
+        # not the G33 pitch-derived slew/SL field.
+        speed_code = _motion_speed_code(self._state.spindle, self.config)
         if mode == "rapid":
             command_active = client.rapid_move_delta(
                 x_mm=x_mm,
                 z_mm=z_mm,
-                slew=slew,
+                slew=speed_code,
                 wait=False,
             )
         elif mode == "feed":
@@ -156,7 +159,7 @@ class FredBackend:
                 x_mm=x_mm,
                 z_mm=z_mm,
                 feed=feed,
-                slew=slew,
+                slew=speed_code,
                 wait=False,
             )
         else:
@@ -211,11 +214,13 @@ class FredBackend:
         client = self._require_ready()
         _validate_station(current_station, "current station")
         _validate_station(target_station, "target station")
+        # The captured turret blocks also carry old-host SSL in m9.
+        speed_code = _motion_speed_code(self._state.spindle, self.config)
         try:
             command_active = client.change_tool(
                 current_station=current_station,
                 target_station=target_station,
-                slew=slew,
+                slew=speed_code,
                 wait=False,
             )
         except Exception as exc:
@@ -505,6 +510,23 @@ def _spindle_at_speed(
     if target_rpm <= config.spindle_at_speed_tolerance_rpm:
         return True
     return abs(abs(actual_rpm) - target_rpm) <= config.spindle_at_speed_tolerance_rpm
+
+
+def _motion_speed_code(spindle: SpindleState, config: MachineConfig) -> int:
+    if spindle.commanded_on:
+        rpm = spindle.target_rpm
+    elif abs(spindle.actual_rpm) > config.spindle_at_speed_tolerance_rpm:
+        rpm = spindle.actual_rpm
+    else:
+        rpm = 0.0
+    return _spindle_speed_code_from_rpm(rpm)
+
+
+def _spindle_speed_code_from_rpm(rpm: float) -> int:
+    rpm = abs(float(rpm))
+    if rpm <= 4.0:
+        return 0
+    return min(127, int((rpm / 24.0) + 0.5))
 
 
 def _optional_int(value: object) -> int | None:

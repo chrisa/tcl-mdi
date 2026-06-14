@@ -6,6 +6,7 @@ import pytest
 
 from tcl_lathe_hmi.backends.sim import SimBackend
 from tcl_lathe_hmi.config import MachineConfig
+from tcl_lathe_hmi.gcode import ToolChangeAction
 from tcl_lathe_hmi.machine import MachineService
 from tcl_lathe_hmi.tools import ToolRecord
 
@@ -28,6 +29,85 @@ def test_service_rejects_commands_while_backend_is_busy():
     service.poll()
     assert service.state.x_mm == 1.0
     assert service.state.can_accept_commands
+
+
+def test_service_single_step_holds_jog_until_approved():
+    config = MachineConfig(sim_motion_time_s=0.01)
+    service = MachineService(SimBackend(config))
+    service.connect()
+
+    assert service.set_command_mode("single_step")
+    assert service.jog_delta(x_mm=1.0, mode="rapid")
+
+    assert service.command_status.awaiting_approval
+    assert "Jog" in service.command_status.current_label
+    assert not service.state.busy
+    assert service.state.x_mm == 0.0
+
+    assert service.approve_pending_command()
+    assert service.state.busy
+    service.backend.wait_idle(timeout_ms=500)
+    service.poll()
+
+    assert service.state.x_mm == 1.0
+    assert not service.command_status.awaiting_approval
+
+
+def test_service_single_step_cancel_prevents_backend_submission():
+    service = MachineService(SimBackend(MachineConfig()))
+    service.connect()
+    assert service.set_command_mode("single_step")
+    assert service.jog_delta(z_mm=1.0, mode="rapid")
+
+    cancel_generation = service.command_status.cancel_generation
+    assert service.cancel_pending_command()
+
+    assert service.command_status.cancel_generation == cancel_generation + 1
+    assert not service.command_status.awaiting_approval
+    assert service.state.z_mm == 0.0
+    assert not service.approve_pending_command()
+    assert service.state.z_mm == 0.0
+
+
+def test_service_single_step_holds_spindle_until_approved():
+    config = MachineConfig(sim_spindle_command_time_s=0.01)
+    service = MachineService(SimBackend(config))
+    service.connect()
+    assert service.set_command_mode("single_step")
+
+    assert service.set_spindle(on=True, rpm=1200, forward=False)
+
+    assert service.command_status.awaiting_approval
+    assert not service.state.spindle.commanded_on
+
+    assert service.approve_pending_command()
+
+    assert service.state.spindle.commanded_on
+    assert service.state.spindle.target_rpm == 1200
+    assert not service.state.spindle.forward
+
+
+def test_service_single_step_holds_tool_change_until_approved():
+    config = MachineConfig(sim_tool_change_time_s=0.01)
+    service = MachineService(SimBackend(config))
+    service.connect()
+    service.upsert_tool(ToolRecord(tool_number=4, x_offset_mm=-1.0, z_offset_mm=2.5))
+    assert service.assign_tool_station(4, 2)
+    assert service.set_turret_station(1)
+    assert service.set_command_mode("single_step")
+
+    assert service.execute_action(ToolChangeAction(line_number=5, tool_number=4))
+
+    assert service.command_status.awaiting_approval
+    assert service.state.active_tool == 0
+    assert service.state.turret_station == 1
+
+    assert service.approve_pending_command()
+
+    assert service.state.active_tool == 4
+    assert service.state.turret_station == 2
+    assert service.state.tool_x_offset_mm == -1.0
+    assert service.state.tool_z_offset_mm == 2.5
 
 
 def test_service_disconnect_resets_state():

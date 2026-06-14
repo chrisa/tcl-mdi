@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
@@ -19,8 +19,9 @@ from tcl_lathe_hmi.gcode import (
 from tcl_lathe_hmi.tools import TURRET_STATIONS, ToolManager, ToolRecord, ToolSetup, ToolTable, Turret
 
 from .backend import BackendError, CommandRejectedError, MachineBackend
+from .command_pipeline import CommandMode, CommandPipeline, CommandPipelineStatus
 from .state import MachineState
-from .toolchanger import ToolChangeCoordinator
+from .toolchanger import ToolChangeCoordinator, ToolChangeResolution
 
 
 class MachineService:
@@ -41,6 +42,7 @@ class MachineService:
             self.settings_path.parent / "lathe.tbl" if self.settings_path is not None else None
         )
         self.backend = backend
+        self.command_pipeline = CommandPipeline()
         self.tools = ToolManager(
             path=self.tool_setup_path,
             legacy_path=legacy_tool_table_path,
@@ -66,7 +68,85 @@ class MachineService:
     def turret(self) -> Turret:
         return self.tools.turret
 
+    @property
+    def command_status(self) -> CommandPipelineStatus:
+        return self.command_pipeline.status
+
+    def set_command_mode(self, mode: CommandMode) -> bool:
+        if not self.command_pipeline.set_mode(mode):
+            self._mark_rejected("Approve or cancel the pending command before changing mode")
+            return False
+        label = "Auto run" if mode == "auto" else "Single step"
+        self.state = replace(self.state, status_message=f"{label} command mode selected")
+        return True
+
+    def set_next_command_label(self, label: str | None) -> None:
+        self.command_pipeline.set_next_label(label)
+
+    def describe_action(
+        self,
+        action: CanonicalAction,
+        *,
+        default_feed: int = 100,
+    ) -> str:
+        line = f"Line {getattr(action, 'line_number', '?')}"
+        if isinstance(action, MoveAction):
+            feed = int(action.feed or default_feed)
+            target = f"to X {action.target_x_mm:+0.3f} Z {action.target_z_mm:+0.3f}"
+            suffix = f" F{feed}" if action.mode == "feed" else ""
+            return f"{line}: {action.mode.title()} move {target}{suffix}"
+        if isinstance(action, SpindleAction):
+            return self._spindle_command_label(
+                on=action.on,
+                rpm=action.rpm,
+                forward=action.forward,
+                context=line,
+            )
+        if isinstance(action, ToolChangeAction):
+            station = "" if action.turret_station is None else f" P{action.turret_station}"
+            tool = "--" if action.tool_number is None else str(action.tool_number)
+            return f"{line}: Tool change T{tool}{station}"
+        if isinstance(action, DwellAction):
+            return f"{line}: Dwell {max(0.0, action.seconds):0.3f}s"
+        if isinstance(action, ThreadSyncAction):
+            return (
+                f"{line}: Thread sync to Z {action.target_z_mm:+0.3f} "
+                f"pitch {action.pitch_mm:0.3f}"
+            )
+        if isinstance(action, MessageAction):
+            return f"{line}: Message"
+        return f"{line}: Unsupported action"
+
+    def approve_pending_command(self) -> bool:
+        if not self.command_pipeline.awaiting_approval:
+            self._mark_rejected("No command is waiting for approval")
+            return False
+        try:
+            ok = self.command_pipeline.approve_pending()
+        except CommandRejectedError as exc:
+            self._mark_rejected(str(exc))
+            return False
+        except BackendError as exc:
+            self._mark_error(str(exc))
+            return False
+        if not ok:
+            self._mark_rejected("Command was not accepted")
+            return False
+        self._clear_completed_command_if_idle()
+        return True
+
+    def cancel_pending_command(self) -> bool:
+        if not self.command_pipeline.cancel_pending():
+            self._mark_rejected("No command is waiting for approval")
+            return False
+        self.state = replace(
+            self.state,
+            status_message=self.command_pipeline.current_label,
+        )
+        return True
+
     def set_backend(self, backend: MachineBackend) -> MachineState:
+        self.command_pipeline.clear_pending()
         try:
             self.backend.disconnect()
         except BackendError:
@@ -91,6 +171,7 @@ class MachineService:
         return self.state
 
     def disconnect(self) -> MachineState:
+        self.command_pipeline.clear_pending()
         try:
             self.backend.disconnect()
         finally:
@@ -102,6 +183,7 @@ class MachineService:
             return self.state
         try:
             self.state = self._merge_tool_state(self.backend.poll())
+            self._clear_completed_command_if_idle()
         except BackendError as exc:
             self.state = replace(
                 self.state,
@@ -131,6 +213,7 @@ class MachineService:
         mode: str = "feed",
         feed: int = 100,
         slew: int = 61,
+        context: str = "Jog",
     ) -> bool:
         if not self.state.can_accept_commands:
             self._mark_rejected("Machine is not ready for jog")
@@ -142,15 +225,23 @@ class MachineService:
             if limit_error is not None:
                 self._mark_rejected(limit_error)
                 return False
-            self.backend.jog_delta(
+            label = self._jog_command_label(
                 x_mm=x_mm,
                 z_mm=z_mm,
                 mode=mode,
                 feed=feed,
-                slew=slew,
+                context=context,
             )
-            self.state = self._merge_tool_state(self.backend.poll())
-            return True
+            return self._submit_backend_command(
+                label,
+                lambda: self._run_jog_command(
+                    x_mm=x_mm,
+                    z_mm=z_mm,
+                    mode=mode,
+                    feed=feed,
+                    slew=slew,
+                ),
+            )
         except CommandRejectedError as exc:
             self._mark_rejected(str(exc))
             return False
@@ -158,14 +249,28 @@ class MachineService:
             self._mark_error(str(exc))
             return False
 
-    def set_spindle(self, *, on: bool, rpm: float = 0.0, forward: bool = True) -> bool:
+    def set_spindle(
+        self,
+        *,
+        on: bool,
+        rpm: float = 0.0,
+        forward: bool = True,
+        context: str = "Spindle",
+    ) -> bool:
         if not self.state.can_accept_commands:
             self._mark_rejected("Machine is not ready for spindle command")
             return False
         try:
-            self.backend.set_spindle(on=on, rpm=rpm, forward=forward)
-            self.state = self._merge_tool_state(self.backend.poll())
-            return True
+            label = self._spindle_command_label(
+                on=on,
+                rpm=rpm,
+                forward=forward,
+                context=context,
+            )
+            return self._submit_backend_command(
+                label,
+                lambda: self._run_spindle_command(on=on, rpm=rpm, forward=forward),
+            )
         except CommandRejectedError as exc:
             self._mark_rejected(str(exc))
             return False
@@ -187,7 +292,12 @@ class MachineService:
                 default_slew=default_slew,
             )
         if isinstance(action, SpindleAction):
-            return self.set_spindle(on=action.on, rpm=action.rpm, forward=action.forward)
+            return self.set_spindle(
+                on=action.on,
+                rpm=action.rpm,
+                forward=action.forward,
+                context=f"Line {action.line_number}",
+            )
         if isinstance(action, ToolChangeAction):
             return self.request_tool_change(action)
         if isinstance(action, DwellAction):
@@ -234,6 +344,7 @@ class MachineService:
             mode=action.mode,
             feed=int(action.feed or default_feed),
             slew=default_slew,
+            context=f"Line {action.line_number}",
         )
 
     def _execute_dwell_action(self, action: DwellAction) -> bool:
@@ -241,9 +352,11 @@ class MachineService:
             self._mark_rejected("Machine is not ready for dwell")
             return False
         try:
-            self.backend.dwell(seconds=action.seconds)
-            self.state = self._merge_tool_state(self.backend.poll())
-            return True
+            label = f"Line {action.line_number}: Dwell {max(0.0, action.seconds):0.3f}s"
+            return self._submit_backend_command(
+                label,
+                lambda: self._run_dwell_command(seconds=action.seconds),
+            )
         except CommandRejectedError as exc:
             self._mark_rejected(str(exc))
             return False
@@ -280,13 +393,18 @@ class MachineService:
             return True
 
         try:
-            self.backend.thread_sync_move(
-                z_mm=dz,
-                pitch=action.pitch_mm,
-                slew=default_slew,
+            label = (
+                f"Line {action.line_number}: Thread sync Z {dz:+0.3f} "
+                f"pitch {action.pitch_mm:0.3f}"
             )
-            self.state = self._merge_tool_state(self.backend.poll())
-            return True
+            return self._submit_backend_command(
+                label,
+                lambda: self._run_thread_sync_command(
+                    z_mm=dz,
+                    pitch=action.pitch_mm,
+                    slew=default_slew,
+                ),
+            )
         except CommandRejectedError as exc:
             self._mark_rejected(str(exc))
             return False
@@ -355,6 +473,7 @@ class MachineService:
         station: int | None = None,
         *,
         context: str = "Tool change",
+        preserve_pending_tool: bool = False,
     ) -> bool:
         if not self.state.can_accept_commands:
             self._mark_rejected("Machine is not ready for toolchanger command")
@@ -388,17 +507,26 @@ class MachineService:
             return False
         target_station = resolution.station
         assert target_station is not None
+        preserved_pending_tool = self.state.pending_tool if preserve_pending_tool else None
+        preserved_pending_station = (
+            self.state.pending_turret_station if preserve_pending_tool else None
+        )
 
         try:
-            self.backend.select_tool(
-                current_station=current_station,
-                target_station=target_station,
-                slew=self.config.jog_slew,
+            label = (
+                f"{context}: Tool change T{resolution.tool.tool_number} "
+                f"P{current_station}->P{target_station}"
             )
-            self._apply_active_tool(resolution)
-            self.state = self._merge_tool_state(self.backend.poll())
-            self.save_settings()
-            return True
+            return self._submit_backend_command(
+                label,
+                lambda: self._run_tool_change_command(
+                    current_station=current_station,
+                    target_station=target_station,
+                    resolution=resolution,
+                    preserved_pending_tool=preserved_pending_tool,
+                    preserved_pending_station=preserved_pending_station,
+                ),
+            )
         except CommandRejectedError as exc:
             self._mark_rejected(str(exc))
             return False
@@ -612,9 +740,11 @@ class MachineService:
         normalized = axis.strip().upper()
         if normalized == "X":
             self.set_work_position(x_mm=0.0)
+            self.state = replace(self.state, status_message="X DRO zeroed")
             return True
         if normalized == "Z":
             self.set_work_position(z_mm=0.0)
+            self.state = replace(self.state, status_message="Z DRO zeroed")
             return True
         self._mark_rejected(f"Unsupported work offset axis: {axis}")
         return False
@@ -761,6 +891,115 @@ class MachineService:
             - self.state.tool_z_offset_mm
         )
         return self._limits_error_for_target(target_machine_x, target_machine_z, context)
+
+    def _submit_backend_command(self, label: str, execute: Callable[[], bool]) -> bool:
+        submission = self.command_pipeline.submit(label, execute)
+        if not submission.accepted:
+            self._mark_rejected(submission.message)
+            return False
+        if submission.awaiting_approval:
+            self.state = replace(self.state, status_message=f"Awaiting Go: {label}")
+            return True
+        self._clear_completed_command_if_idle()
+        return bool(submission.value)
+
+    def _clear_completed_command_if_idle(self) -> None:
+        if not self.state.busy:
+            self.command_pipeline.clear_completed_current()
+
+    def _run_jog_command(
+        self,
+        *,
+        x_mm: float,
+        z_mm: float,
+        mode: str,
+        feed: int,
+        slew: int,
+    ) -> bool:
+        self.backend.jog_delta(
+            x_mm=x_mm,
+            z_mm=z_mm,
+            mode=mode,
+            feed=feed,
+            slew=slew,
+        )
+        self.state = self._merge_tool_state(self.backend.poll())
+        return True
+
+    def _run_spindle_command(self, *, on: bool, rpm: float, forward: bool) -> bool:
+        self.backend.set_spindle(on=on, rpm=rpm, forward=forward)
+        self.state = self._merge_tool_state(self.backend.poll())
+        return True
+
+    def _run_dwell_command(self, *, seconds: float) -> bool:
+        self.backend.dwell(seconds=seconds)
+        self.state = self._merge_tool_state(self.backend.poll())
+        return True
+
+    def _run_thread_sync_command(self, *, z_mm: float, pitch: float, slew: int) -> bool:
+        self.backend.thread_sync_move(z_mm=z_mm, pitch=pitch, slew=slew)
+        self.state = self._merge_tool_state(self.backend.poll())
+        return True
+
+    def _run_tool_change_command(
+        self,
+        *,
+        current_station: int,
+        target_station: int,
+        resolution: ToolChangeResolution,
+        preserved_pending_tool: int | None,
+        preserved_pending_station: int | None,
+    ) -> bool:
+        self.backend.select_tool(
+            current_station=current_station,
+            target_station=target_station,
+            slew=self.config.jog_slew,
+        )
+        self._apply_active_tool(resolution)
+        if preserved_pending_tool is not None:
+            self.state = replace(
+                self.state,
+                pending_tool=preserved_pending_tool,
+                pending_turret_station=preserved_pending_station,
+            )
+        self.state = self._merge_tool_state(self.backend.poll())
+        self.save_settings()
+        return True
+
+    def _jog_command_label(
+        self,
+        *,
+        x_mm: float,
+        z_mm: float,
+        mode: str,
+        feed: int,
+        context: str,
+    ) -> str:
+        axes = self._axis_delta_label(x_mm=x_mm, z_mm=z_mm)
+        suffix = f" F{feed}" if mode == "feed" else ""
+        return f"{context}: {mode.title()} move {axes}{suffix}"
+
+    def _spindle_command_label(
+        self,
+        *,
+        on: bool,
+        rpm: float,
+        forward: bool,
+        context: str,
+    ) -> str:
+        if not on:
+            return f"{context}: Spindle stop"
+        direction = "forward" if forward else "reverse"
+        return f"{context}: Spindle {direction} {max(0.0, float(rpm)):0.0f} rpm"
+
+    @staticmethod
+    def _axis_delta_label(*, x_mm: float, z_mm: float) -> str:
+        parts: list[str] = []
+        if abs(x_mm) >= 1e-9:
+            parts.append(f"X {x_mm:+0.3f}")
+        if abs(z_mm) >= 1e-9:
+            parts.append(f"Z {z_mm:+0.3f}")
+        return " ".join(parts) if parts else "X +0.000 Z +0.000"
 
     def _merge_tool_state(self, backend_state: MachineState) -> MachineState:
         return replace(

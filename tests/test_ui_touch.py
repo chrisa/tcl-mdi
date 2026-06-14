@@ -8,6 +8,8 @@ from typing import Any, cast
 
 import pytest
 
+pytest.importorskip("kivy")
+
 from kivy.clock import Clock
 
 from tcl_lathe_hmi.backends.sim import SimBackend
@@ -16,8 +18,6 @@ from tcl_lathe_hmi.gcode import ToolChangeAction
 from tcl_lathe_hmi.machine.service import MachineService
 from tcl_lathe_hmi.tools import ToolRecord
 from tcl_lathe_hmi.ui.widgets import bind_release
-
-pytest.importorskip("kivy")
 
 from tcl_lathe_hmi.ui import app as app_module
 from tcl_lathe_hmi.ui.app import ManualPanel, action_button, toggle_button
@@ -208,6 +208,104 @@ def test_custom_jog_distance_selects_only_custom_button(tmp_path: Path):
     assert panel.custom_increment_mm == pytest.approx(0.25)
     assert panel.custom_increment_button.state == "down"
     assert all(button.state == "normal" for button in fixed_buttons)
+    panel.cancel_scheduled_events()
+
+
+def test_manual_dro_axis_labels_zero_work_axes_independently(tmp_path: Path):
+    panel = _manual_panel(tmp_path)
+    panel.service.set_work_position(x_mm=12.5, z_mm=-4.0)
+
+    panel._zero_dro_axis("X")
+
+    assert panel.service.state.work_x_mm == pytest.approx(0.0)
+    assert panel.service.state.work_z_mm == pytest.approx(-4.0)
+    assert panel.service.state.status_message == "X DRO zeroed"
+
+    panel._zero_dro_axis("Z")
+
+    assert panel.service.state.work_x_mm == pytest.approx(0.0)
+    assert panel.service.state.work_z_mm == pytest.approx(0.0)
+    assert panel.service.state.status_message == "Z DRO zeroed"
+    panel.cancel_scheduled_events()
+
+
+def test_command_gate_panel_tracks_single_step_pending_command(tmp_path: Path):
+    panel = _manual_panel(tmp_path)
+
+    assert panel.command_auto_button is not None
+    assert panel.command_single_step_button is not None
+    assert panel.command_go_button is not None
+    assert panel.command_cancel_button is not None
+    assert panel.command_current_label is not None
+    assert panel.command_next_label is not None
+
+    panel.command_single_step_button.state = "down"
+    panel._set_command_mode(panel.command_single_step_button, "single_step")
+    assert panel.service.command_status.mode == "single_step"
+
+    assert panel.service.jog_delta(x_mm=0.1, mode="rapid")
+    panel.refresh(panel.service.state)
+
+    assert panel.command_go_button.disabled is False
+    assert panel.command_cancel_button.disabled is False
+    assert panel.command_auto_button.disabled is True
+    assert "Awaiting Go" in panel.command_current_label.text
+
+    panel._cancel_pending_command()
+
+    assert panel.command_go_button.disabled is True
+    assert panel.command_cancel_button.disabled is True
+    assert "Cancelled" in panel.command_current_label.text
+    panel.cancel_scheduled_events()
+
+
+def test_program_waits_for_single_step_go_before_advancing(tmp_path: Path):
+    config = MachineConfig(sim_motion_time_s=0.01)
+    panel = _manual_panel(tmp_path, config=config)
+    assert panel.program_panel is not None
+    program = panel.program_panel
+    assert panel.service.set_command_mode("single_step")
+
+    program._start_actions_from_text(
+        "G91 G1 X0.1 F100\nG1 Z-0.2 F100\n",
+        label="Test",
+        highlight_editor=False,
+    )
+
+    assert program.running
+    assert program.waiting_for_approval
+    assert program.execution_index == 0
+    assert panel.service.command_status.awaiting_approval
+    assert panel.service.state.x_mm == 0.0
+    assert "Line 2" in panel.service.command_status.next_label
+
+    assert panel.service.approve_pending_command()
+    panel.service.backend.wait_idle(timeout_ms=500)
+    panel.service.poll()
+    panel.refresh(panel.service.state)
+
+    assert program.running
+    assert program.execution_index == 1
+    assert program.waiting_for_approval
+    assert panel.service.command_status.awaiting_approval
+    assert panel.service.state.x_mm == pytest.approx(0.1)
+    panel.cancel_scheduled_events()
+
+
+def test_program_stops_when_single_step_command_is_cancelled(tmp_path: Path):
+    panel = _manual_panel(tmp_path)
+    assert panel.program_panel is not None
+    program = panel.program_panel
+    assert panel.service.set_command_mode("single_step")
+
+    program._start_actions_from_text("G91 G1 X0.1 F100\n", label="Test", highlight_editor=False)
+    assert program.waiting_for_approval
+
+    assert panel.service.cancel_pending_command()
+    panel.refresh(panel.service.state)
+
+    assert not program.running
+    assert "command cancelled" in program.program_status.text.lower()
     panel.cancel_scheduled_events()
 
 

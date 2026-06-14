@@ -88,6 +88,13 @@ class ManualPanel(BoxLayout):
         self.machine_panel: BoxLayout | None = None
         self.work_container: BoxLayout | None = None
         self.nav_buttons: dict[str, Button] = {}
+        self.command_auto_button: ToggleButton | None = None
+        self.command_single_step_button: ToggleButton | None = None
+        self.command_go_button: Button | None = None
+        self.command_cancel_button: Button | None = None
+        self.command_current_label: Label | None = None
+        self.command_next_label: Label | None = None
+        self._syncing_command_gate = False
         self._status_flash_event = None
         self._status_flash_phase = 0
         self._status_flash_active = False
@@ -139,13 +146,98 @@ class ManualPanel(BoxLayout):
         panel = BoxLayout(orientation="vertical", spacing=10, size_hint_x=0.38)
         paint(panel, PANEL)
 
-        self.readouts = MachineReadouts(size_hint_x=1, size_hint_y=0.66)
+        self.readouts = MachineReadouts(size_hint_x=1, size_hint_y=0.48)
+        self.readouts.bind_zero_axis(self._zero_dro_axis)
         panel.add_widget(self.readouts)
 
         spindle = self._build_spindle_controls()
-        spindle.size_hint_y = 0.34
+        spindle.size_hint_y = 0.24
         panel.add_widget(spindle)
+
+        command_gate = self._build_command_gate_panel()
+        command_gate.size_hint_y = 0.28
+        panel.add_widget(command_gate)
         return panel
+
+    def _build_command_gate_panel(self) -> BoxLayout:
+        box = BoxLayout(orientation="vertical", spacing=4)
+        paint(box, PANEL_ALT)
+        box.add_widget(
+            Label(
+                text="Command Gate",
+                color=TEXT,
+                font_size=18,
+                bold=True,
+                size_hint_y=None,
+                height=26,
+            )
+        )
+
+        mode_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=38)
+        group = f"command_mode_{id(self)}"
+        self.command_auto_button = toggle_button("Auto Run", group=group)
+        self.command_single_step_button = toggle_button("Single Step", group=group)
+        self.command_auto_button.font_size = 17
+        self.command_single_step_button.font_size = 17
+        self.command_auto_button.state = "down"
+        self.command_auto_button.bind(
+            state=lambda button, state: self._command_mode_state_changed(
+                button,
+                state,
+                "auto",
+            )
+        )
+        self.command_single_step_button.bind(
+            state=lambda button, state: self._command_mode_state_changed(
+                button,
+                state,
+                "single_step",
+            )
+        )
+        self._style_toggle(self.command_auto_button)
+        self._style_toggle(self.command_single_step_button)
+        mode_row.add_widget(self.command_auto_button)
+        mode_row.add_widget(self.command_single_step_button)
+        box.add_widget(mode_row)
+
+        action_row = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=38)
+        self.command_go_button = action_button("Go", GREEN)
+        self.command_cancel_button = action_button("Cancel", AMBER)
+        self.command_go_button.font_size = 18
+        self.command_cancel_button.font_size = 18
+        bind_release(self.command_go_button, lambda *_: self._approve_pending_command())
+        bind_release(self.command_cancel_button, lambda *_: self._cancel_pending_command())
+        action_row.add_widget(self.command_go_button)
+        action_row.add_widget(self.command_cancel_button)
+        box.add_widget(action_row)
+
+        self.command_current_label = Label(
+            text="Current: --",
+            color=TEXT,
+            font_size=14,
+            halign="left",
+            valign="middle",
+            size_hint_y=None,
+            height=26,
+        )
+        self.command_current_label.bind(
+            size=lambda widget, *_: setattr(widget, "text_size", widget.size)
+        )
+        self.command_next_label = Label(
+            text="Next: --",
+            color=MUTED,
+            font_size=14,
+            halign="left",
+            valign="middle",
+            size_hint_y=None,
+            height=26,
+        )
+        self.command_next_label.bind(
+            size=lambda widget, *_: setattr(widget, "text_size", widget.size)
+        )
+        box.add_widget(self.command_current_label)
+        box.add_widget(self.command_next_label)
+        return box
 
     def _build_manual_work(self) -> BoxLayout:
         panel = BoxLayout(orientation="vertical", spacing=10)
@@ -458,6 +550,7 @@ class ManualPanel(BoxLayout):
         self.connect_button.background_color = RED if state.error else (AMBER if state.connected else BLUE)
 
         self.readouts.refresh(state)
+        self._refresh_command_gate()
 
         station = "--" if state.turret_station is None else str(state.turret_station)
         pending = "" if state.pending_tool is None else f" -> T{state.pending_tool}"
@@ -524,7 +617,7 @@ class ManualPanel(BoxLayout):
         else:
             self.work_container.add_widget(self.manual_work)
             self.current_view = "manual"
-        self._set_machine_panel_visible(self.current_view in {"manual", "program", "tools"})
+        self._set_machine_panel_visible(True)
         self._style_nav_buttons()
         self.refresh(self.service.state)
 
@@ -567,6 +660,75 @@ class ManualPanel(BoxLayout):
         else:
             self.service.connect()
         self.refresh(self.service.state)
+
+    def _zero_dro_axis(self, axis: str) -> None:
+        ok = self.service.zero_work_axis(axis)
+        self._set_status(self.service.state.status_message, flash=not ok)
+
+    def _command_mode_state_changed(
+        self,
+        button: ToggleButton,
+        state: str,
+        mode: str,
+    ) -> None:
+        self._style_toggle(button)
+        if self._syncing_command_gate or state != "down":
+            return
+        self._set_command_mode(button, mode)
+
+    def _set_command_mode(self, button: ToggleButton, mode: str) -> None:
+        if button.state != "down":
+            return
+        if mode not in {"auto", "single_step"}:
+            return
+        if not self.service.set_command_mode(mode):
+            self._set_status(self.service.state.status_message, flash=True)
+            return
+        self.refresh(self.service.state)
+
+    def _approve_pending_command(self) -> None:
+        if not self.service.approve_pending_command():
+            self._set_status(self.service.state.status_message, flash=True)
+            return
+        self.refresh(self.service.state)
+
+    def _cancel_pending_command(self) -> None:
+        if not self.service.cancel_pending_command():
+            self._set_status(self.service.state.status_message, flash=True)
+            return
+        self.refresh(self.service.state)
+
+    def _refresh_command_gate(self) -> None:
+        if (
+            self.command_auto_button is None
+            or self.command_single_step_button is None
+            or self.command_go_button is None
+            or self.command_cancel_button is None
+            or self.command_current_label is None
+            or self.command_next_label is None
+        ):
+            return
+        status = self.service.command_status
+        self._syncing_command_gate = True
+        try:
+            self.command_auto_button.state = "down" if status.mode == "auto" else "normal"
+            self.command_single_step_button.state = (
+                "down" if status.mode == "single_step" else "normal"
+            )
+            self.command_auto_button.disabled = status.awaiting_approval
+            self.command_single_step_button.disabled = status.awaiting_approval
+            approval_enabled = status.mode == "single_step" and status.awaiting_approval
+            self.command_go_button.disabled = not approval_enabled
+            self.command_cancel_button.disabled = not approval_enabled
+            current_prefix = "Awaiting Go" if status.awaiting_approval else "Current"
+            self.command_current_label.text = f"{current_prefix}: {status.current_label}"
+            self.command_current_label.color = AMBER if status.awaiting_approval else TEXT
+            self.command_next_label.text = f"Next: {status.next_label}"
+            self.command_next_label.color = TEXT if status.next_label != "--" else MUTED
+            self._style_toggle(self.command_auto_button)
+            self._style_toggle(self.command_single_step_button)
+        finally:
+            self._syncing_command_gate = False
 
     def _set_increment(self, button: ToggleButton, value: float) -> None:
         if button.state == "down":
@@ -649,6 +811,8 @@ class ManualPanel(BoxLayout):
         )
         if not ok:
             self._set_status(self.service.state.status_message, flash=True)
+        elif self.service.command_status.awaiting_approval:
+            self._set_status(self.service.state.status_message)
         else:
             self._set_status(f"Jog sent X {x_mm:+0.3f} Z {z_mm:+0.3f}")
         self.refresh(self.service.state)
@@ -703,20 +867,14 @@ class ManualPanel(BoxLayout):
             return
 
         pending_tool = self.service.state.pending_tool
-        pending_station = self.service.state.pending_turret_station
         ok = self.service.change_tool(
             tool_number,
             station=station,
             context="Manual toolchanger",
+            preserve_pending_tool=pending_tool is not None,
         )
-        if ok and pending_tool is not None:
-            self.service.state = replace(
-                self.service.state,
-                pending_tool=pending_tool,
-                pending_turret_station=pending_station,
-            )
         self._set_status(self.service.state.status_message, flash=not ok)
-        if ok:
+        if ok and not self.service.command_status.awaiting_approval:
             self._start_manual_tool_button_flash(
                 station=station,
                 action="change",

@@ -44,6 +44,10 @@ class ProgramPanel(BoxLayout):
         self.execution_index = 0
         self.waiting_for_idle = False
         self.waiting_for_tool = False
+        self.waiting_for_approval = False
+        self.approval_completion_generation = 0
+        self.approval_cancel_generation = 0
+        self.approval_failure_generation = 0
         self.highlight_editor_lines = False
         self.history: list[str] = []
 
@@ -357,7 +361,12 @@ class ProgramPanel(BoxLayout):
         self.execution_index = 0
         self.waiting_for_idle = False
         self.waiting_for_tool = False
+        self.waiting_for_approval = False
+        self.approval_completion_generation = 0
+        self.approval_cancel_generation = 0
+        self.approval_failure_generation = 0
         self.highlight_editor_lines = highlight_editor
+        self._set_next_action_label(0)
         warning = self._tool_offset_warning(self.actions)
         self.program_status.text = f"{label}: running {len(self.actions)} action(s)"
         if warning:
@@ -371,6 +380,26 @@ class ProgramPanel(BoxLayout):
         if state.error or not state.connected:
             self._stop_program("Program stopped: machine unavailable")
             return
+        if self.waiting_for_approval:
+            status = self.service.command_status
+            if status.awaiting_approval:
+                self.program_status.text = f"Waiting for Go: {status.current_label}"
+                self.program_status.color = AMBER
+                return
+            if status.cancel_generation != self.approval_cancel_generation:
+                self._stop_program("Program stopped: command cancelled")
+                return
+            if status.failure_generation != self.approval_failure_generation:
+                self._stop_program(self.service.state.status_message)
+                return
+            if status.completion_generation == self.approval_completion_generation:
+                self._stop_program("Program stopped: command approval cleared")
+                return
+            self.waiting_for_approval = False
+            if state.busy:
+                self.waiting_for_idle = True
+                return
+            self.execution_index += 1
         if self.waiting_for_tool:
             if state.pending_tool is not None:
                 self.program_status.text = (
@@ -395,6 +424,7 @@ class ProgramPanel(BoxLayout):
         while self.running and self.execution_index < len(self.actions):
             action = self.actions[self.execution_index]
             self._highlight_action_line(action)
+            self._set_next_action_label(self.execution_index + 1)
             ok = self.service.execute_action(
                 action,
                 default_feed=self.config.jog_feed,
@@ -413,6 +443,15 @@ class ProgramPanel(BoxLayout):
                     return
                 self._stop_program(self.service.state.status_message)
                 return
+            if self.service.command_status.awaiting_approval:
+                status = self.service.command_status
+                self.waiting_for_approval = True
+                self.approval_completion_generation = status.completion_generation
+                self.approval_cancel_generation = status.cancel_generation
+                self.approval_failure_generation = status.failure_generation
+                self.program_status.text = f"Waiting for Go: {status.current_label}"
+                self.program_status.color = AMBER
+                return
             if self.service.state.busy:
                 self.waiting_for_idle = True
                 return
@@ -422,6 +461,7 @@ class ProgramPanel(BoxLayout):
             self.running = False
             self.highlight_editor_lines = False
             self._clear_line_highlight()
+            self._set_next_action_label(None)
             self.program_status.text = "Program complete"
             self.program_status.color = GREEN
 
@@ -429,10 +469,23 @@ class ProgramPanel(BoxLayout):
         self.running = False
         self.waiting_for_idle = False
         self.waiting_for_tool = False
+        self.waiting_for_approval = False
         self.highlight_editor_lines = False
         self._clear_line_highlight()
+        self._set_next_action_label(None)
         self.program_status.text = message
         self.program_status.color = AMBER if "stopped" in message.lower() else RED
+
+    def _set_next_action_label(self, index: int | None) -> None:
+        if index is None or index < 0 or index >= len(self.actions):
+            self.service.set_next_command_label(None)
+            return
+        self.service.set_next_command_label(
+            self.service.describe_action(
+                self.actions[index],
+                default_feed=self.config.jog_feed,
+            )
+        )
 
     def _load_program(self) -> None:
         path = Path(self.path_input.text).expanduser()

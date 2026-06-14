@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
 
@@ -21,10 +23,20 @@ class MachineReadouts(BoxLayout):
         kwargs.setdefault("size_hint_x", 0.62)
         super().__init__(orientation="vertical", spacing=10, **kwargs)
         paint(self, PANEL)
+        self._zero_axis_callback: Callable[[str], None] | None = None
 
-        self.x_value, self.x_detail = self._add_dro_row("X", "mm")
-        self.z_value, self.z_detail = self._add_dro_row("Z", "mm")
+        self.x_axis_label, self.x_value, self.x_detail = self._add_dro_row("X", "mm")
+        self.z_axis_label, self.z_value, self.z_detail = self._add_dro_row("Z", "mm")
         self.rpm_value, self.rpm_detail = self._add_spindle_row()
+
+    def bind_zero_axis(self, callback: Callable[[str], None]) -> None:
+        self._zero_axis_callback = callback
+        self.x_axis_label.bind(
+            on_touch_down=lambda label, touch: self._axis_label_touched("X", label, touch)
+        )
+        self.z_axis_label.bind(
+            on_touch_down=lambda label, touch: self._axis_label_touched("Z", label, touch)
+        )
 
     def refresh(self, state: MachineState) -> None:
         self.x_value.text = f"{state.display_x_mm:+0.3f}"
@@ -49,10 +61,11 @@ class MachineReadouts(BoxLayout):
         )
         self.rpm_detail.color = GREEN if state.spindle.at_speed else AMBER
 
-    def _add_dro_row(self, axis: str, unit: str) -> tuple[Label, Label]:
+    def _add_dro_row(self, axis: str, unit: str) -> tuple[Label, Label, Label]:
         row = BoxLayout(orientation="horizontal", size_hint_y=0.34, spacing=8)
         paint(row, PANEL_ALT)
-        row.add_widget(axis_label(axis, width=130))
+        axis_widget = axis_label(axis, width=130)
+        row.add_widget(axis_widget)
 
         value = Label(text="+0.000", color=TEXT, font_size=92, bold=True, halign="right")
         value.bind(size=lambda widget, *_: setattr(widget, "text_size", widget.size))
@@ -65,7 +78,7 @@ class MachineReadouts(BoxLayout):
         row.add_widget(side)
 
         self.add_widget(row)
-        return value, detail
+        return axis_widget, value, detail
 
     def _add_spindle_row(self) -> tuple[Label, Label]:
         row = BoxLayout(orientation="horizontal", size_hint_y=0.32, spacing=8)
@@ -87,3 +100,11 @@ class MachineReadouts(BoxLayout):
 
         self.add_widget(row)
         return value, detail
+
+    def _axis_label_touched(self, axis: str, label: Label, touch) -> bool:
+        if self._zero_axis_callback is None:
+            return False
+        if not label.collide_point(*touch.pos):
+            return False
+        self._zero_axis_callback(axis)
+        return True
